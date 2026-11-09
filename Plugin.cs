@@ -118,7 +118,6 @@ static class Core
     static int consoleCount;
     static bool hasHit;
     static RaycastHit hit;
-    static readonly Il2CppReferenceArray<GUILayoutOption> O = new(0);
 
     static NetworkManager NM => NetworkManager.Singleton;
     static bool Online => NM != null && NM.IsListening;
@@ -588,15 +587,44 @@ static class Core
 
     // ───────────────────────── GUI ─────────────────────────
 
-    static bool Btn(string s) => GUILayout.Button(s, O);
-    static bool Btn(string s, float w) => GUILayout.Button(s, new Il2CppReferenceArray<GUILayoutOption>(new[] { GUILayout.Width(w) }));
-    static void Lbl(string s) => GUILayout.Label(s, O);
-    static void Lbl(string s, float w) => GUILayout.Label(s, new Il2CppReferenceArray<GUILayoutOption>(new[] { GUILayout.Width(w) }));
-    static string Txt(string s, float w) => GUILayout.TextField(s ?? "", new Il2CppReferenceArray<GUILayoutOption>(new[] { GUILayout.Width(w) }));
-    static bool Tgl(bool v, string s) => GUILayout.Toggle(v, s, O);
-    static float Sld(float v, float a, float b) => GUILayout.HorizontalSlider(v, a, b, O);
-    static void H() => GUILayout.BeginHorizontal(O);
-    static void EH() => GUILayout.EndHorizontal();
+    // Oyunun build'inde GUILayout motoru stripped (BeginArea/Space/GetLast "unstripping failed").
+    // Bu yüzden sağlam kalan Rect tabanlı GUI.* ile basit bir satır-satır yerleşim.
+    const float LineH = 22f, Gap = 4f;
+    static float lx, lw, cx, cy, rowH, contentH = 1000f, visTop = float.MinValue, visBot = float.MaxValue;
+    static bool inRow;
+
+    static Rect Next(float w, float h)
+    {
+        if (!inRow) { var full = new Rect(lx, cy, lw, h); cy += h + Gap; return full; }
+        if (w <= 0) w = Mathf.Max(40f, lx + lw - cx);   // satırın kalanı
+        var r = new Rect(cx, cy, w, h);
+        cx += w + Gap;
+        rowH = Mathf.Max(rowH, h);
+        return r;
+    }
+
+    static bool Vis(Rect r) => r.yMax >= visTop && r.y <= visBot;   // kaydırma alanı dışını çizme
+    // shortcut: metin genişliği kaba tahmin (CalcSize'a güvenmiyoruz), çok uzun buton yazılarında taşabilir
+    static float TextW(string s) => 18f + 7.5f * System.Text.RegularExpressions.Regex.Replace(s, "<[^>]+>", "").Length;
+
+    static bool Btn(string s) => Btn(s, inRow ? TextW(s) : 0);
+    static bool Btn(string s, float w) { var r = Next(w, LineH); return Vis(r) && GUI.Button(r, s); }
+    static void Lbl(string s) => Lbl(s, 0);
+    static void Lbl(string s, float w)
+    {
+        var r = Next(w, LineH * (1 + s.Count(c => c == '\n')));
+        if (Vis(r)) GUI.Label(r, s);
+    }
+    static string Txt(string s, float w) { var r = Next(w, LineH); return Vis(r) ? GUI.TextField(r, s ?? "") : s; }
+    static bool Tgl(bool v, string s) { var r = Next(inRow ? TextW(s) + 20 : 0, LineH); return Vis(r) ? GUI.Toggle(r, v, s) : v; }
+    static float Sld(float v, float a, float b, float w = 0)
+    {
+        var r = Next(w, LineH);
+        return Vis(r) ? GUI.HorizontalSlider(new Rect(r.x, r.y + 6, r.width, 14), v, a, b) : v;
+    }
+    static void H() { inRow = true; cx = lx; rowH = LineH; }
+    static void EH() { inRow = false; cy += rowH + Gap; }
+    static void Space(float f) => cy += f;
 
     internal static void OnGUI()
     {
@@ -612,12 +640,17 @@ static class Core
         GUI.Label(new Rect(sw / 2 - 5, 540 - 12, 20, 24), "<b>+</b>");
         var r = new Rect(16, 50, 680, 1010);
         GUI.Box(r, ""); GUI.Box(r, "");   // iki kat = daha opak
-        GUILayout.BeginArea(new Rect(r.x + 8, r.y + 6, r.width - 16, r.height - 12));
+        lx = r.x + 8; lw = r.width - 16; cy = r.y + 6; inRow = false;
+        visTop = float.MinValue; visBot = float.MaxValue;
         Lbl("<b><size=16>CST DEBUG MODE</size></b>   F8 menü • F9 HUD • F10 uçma");
         H();
         for (int i = 0; i < Tabs.Length; i++) if (Btn(i == tab ? $"<b>[{Tabs[i]}]</b>" : Tabs[i])) tab = i;
         EH();
-        scroll = GUILayout.BeginScrollView(scroll, O);
+
+        var view = new Rect(lx, cy + 4, lw, r.yMax - cy - 12);
+        scroll = GUI.BeginScrollView(view, scroll, new Rect(0, 0, view.width - 20, Mathf.Max(contentH, view.height)));
+        lx = 0; lw = view.width - 24; cy = 0;
+        visTop = scroll.y - 60; visBot = scroll.y + view.height + 60;
         switch (tab)
         {
             case 0: DrawGeneral(); break;
@@ -626,8 +659,8 @@ static class Core
             case 3: DrawInspector(); break;
             case 4: DrawConsole(); break;
         }
-        GUILayout.EndScrollView();
-        GUILayout.EndArea();
+        contentH = cy;   // bir sonraki karede kaydırma yüksekliği
+        GUI.EndScrollView();
     }
 
     static string Role => !Online ? "Çevrimdışı" : NM.IsHost ? "HOST" : NM.IsServer ? "SERVER" : "CLIENT";
@@ -659,10 +692,10 @@ static class Core
         foreach (var f in new[] { 30, 60, 144, -1 }) if (Btn(f < 0 ? "Yok" : f.ToString(), 50)) Application.targetFrameRate = f;
         EH();
 
-        GUILayout.Space(8);
+        Space(8);
         Lbl($"<b>Zaman ölçeği</b>: {Time.timeScale:0.00}" + (PureClient ? "  (yalnız host değiştirir)" : "  (istemcilere de uygulanır)"));
         H();
-        timeScale = Sld(timeScale, 0f, 5f);
+        timeScale = Sld(timeScale, 0f, 5f, 420);
         if (Btn("Uygula", 70)) SetTimeScale(timeScale);
         EH();
         H();
@@ -687,7 +720,7 @@ static class Core
             if (Btn("Host'u tekrar yokla")) Send(NetworkManager.ServerClientId, "ping");
         }
 
-        GUILayout.Space(6);
+        Space(6);
         Lbl("<b>Oyuncular</b>");
         var me = LocalPlayer();
         foreach (var n in snap.Where(x => x.Player))
@@ -700,7 +733,7 @@ static class Core
             EH();
         }
 
-        GUILayout.Space(6);
+        Space(6);
         H(); Lbl("<b>Ağ nesneleri</b> filtre:", 160); objFilter = Txt(objFilter, 200); EH();
         int shown = 0;
         foreach (var n in snap)
@@ -727,7 +760,7 @@ static class Core
         flySpeed = Sld(flySpeed, 1f, 60f);
         EH();
 
-        GUILayout.Space(6);
+        Space(6);
         Lbl("<b>Konum slotları</b>");
         for (int i = 0; i < slots.Length; i++)
         {
@@ -738,7 +771,7 @@ static class Core
             EH();
         }
 
-        GUILayout.Space(6);
+        Space(6);
         Lbl("<b>Nişangah (+) altındaki nesne</b>");
         if (!hasHit || hit.collider == null) { Lbl("— hiçbir şey —"); return; }
         var go = hit.collider.gameObject;
@@ -785,7 +818,7 @@ static class Core
         for (int i = 0; i < targets.Count; i++)
         {
             var t = targets[i];
-            GUILayout.Space(4);
+            Space(4);
             H();
             t.Open = Tgl(t.Open, $" <b>{t.Label}</b>");
             if (Btn("X", 30)) { targets.RemoveAt(i--); EH(); continue; }
