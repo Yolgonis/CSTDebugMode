@@ -1194,7 +1194,7 @@ static class Core
     static int nextSbi = 900000 + new System.Random().Next(50000);
 
     // Çok yuvalı noktalar (sigorta kutusu vb.): bütün noktayı başlatmak tutmazsa en düşük dayanıklı yuvayı tek değiştir.
-    static (int Slot, InventoryItem Item, float Dur) WorstSlot(CarPartNodeController ctrl)
+    static (int Slot, InventoryItem Item, float Dur) WorstSlot(CarPartNodeController ctrl, CarPartNames? type = null)
     {
         int n = PartCount(ctrl), worst = -1;
         float worstDur = 2f;
@@ -1205,6 +1205,7 @@ static class Core
             {
                 var it = ctrl.GetCarPartByIndex(i).carPartItem.Value;
                 if (!ValidItem(it)) continue;
+                if (type.HasValue && it.ItemType != type.Value) continue;   // sigorta kutusunda röle/diğer boy yuvaları atla
                 float d = InventoryItemExtensions.GetNormalizedDurability(it);
                 if (d < worstDur) { worstDur = d; worst = i; worstItem = it; }
             }
@@ -1337,6 +1338,19 @@ static class Core
             try { last = It(p.lastRemovedCarPartItem.Value); } catch { }
             try { inst = p.isInstalled.Value ? "T" : "f"; } catch { }
             try { t = p.lastProcessFinishTime.Value.ToString("0.0"); } catch { }
+            int slots = PartCount(ctrl);
+            if (slots > 1)
+                for (int si = 0; si < slots; si++)
+                {
+                    try
+                    {
+                        var it = ctrl.GetCarPartByIndex(si).carPartItem.Value;
+                        int hh = InventoryItemExtensions.GetHashSafe(it);
+                        var def = Items().FirstOrDefault(x => itemHash.TryGetValue(x.Pointer, out var v) && v == hh);
+                        Plugin.L.LogInfo($"      yuva {si}: {it.ItemType} {(def != null ? def.GetName + " [" + def.GetIdentical + "]" : "#" + hh)} dur={InventoryItemExtensions.GetNormalizedDurability(it):0.###}");
+                    }
+                    catch (Exception e) { Plugin.L.LogInfo($"      yuva {si}: ? {e.Message}"); }
+                }
             Plugin.L.LogInfo($"   {pn} [{issue}] change={change} need={B(() => ServiceRequestSystem.GetNeededRepair(ctrl))} rep={B(() => ServiceRequestSystem.GetRepaired(ctrl))} "
                 + $"liqNeed={B(() => ServiceRequestSystem.GetLiquidNeededRepair(ctrl))} liqRep={B(() => ServiceRequestSystem.GetLiquidRepaired(ctrl))} installed={inst} lastT={t}\n      cur: {cur}\n      last: {last}");
         }
@@ -1394,11 +1408,11 @@ static class Core
             if (pn is CarPartNames.FuseSmall or CarPartNames.FuseMid or CarPartNames.FuseLarge)
             {
                 // sigorta kutusu: ilk yuva sağlam olabilir; bozuk (en düşük dayanıklı) yuvayı bul ve onu değiştir
-                var (slot, slotItem, slotDur) = WorstSlot(ctrl);
+                var (slot, slotItem, slotDur) = WorstSlot(ctrl, pn);
                 bool blown = false;   // yanık sigorta: dayanıklılık %100 görünür ama oyun "onarılmadı" der
                 try { blown = ServiceRequestSystem.GetNeededRepair(ctrl) && !ServiceRequestSystem.GetRepaired(ctrl); } catch { }
                 if (slot < 0 || (slotDur >= 0.999f && !blown)) { already++; continue; }
-                if (slotDur >= 0.999f) { slot = 0; try { slotItem = ctrl.GetCarPartByIndex(0).carPartItem.Value; } catch { } }
+                // yanık ama dayanıklılık tam: hangi yuva olduğu bilinmiyor → Döküm'de yuvalara bak (şimdilik ilk uygun tür yuva)
                 int oldH = InventoryItemExtensions.GetHashSafe(slotItem);
                 var fc = Candidates(ctrl, pn, oldH).Where(i => itemHash[i.Pointer] != oldH).ToList();   // yanık eşyanın aynısı değil
                 if (fc.Count == 0) fc = Candidates(ctrl, pn).Where(i => itemHash[i.Pointer] != oldH).ToList();
