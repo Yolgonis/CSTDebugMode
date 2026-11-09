@@ -1068,9 +1068,9 @@ static class Core
     static bool repairExtras;   // senaryonun müşteri istemediği ek arızalarını da onar
     static readonly HashSet<CarPartNames> Liquids = new() { CarPartNames.EngineOil, CarPartNames.BrakeSystemFluid, CarPartNames.PowerSteeringFluid, CarPartNames.CoolingRadiatorWater, CarPartNames.WindscreenWasherFluid, CarPartNames.GearOil };
 
-    static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue, bool Change)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
+    static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue, bool Change, ScriptableCarIssue Src)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
     {
-        var res = new List<(CarPartNodeController, CarPartNames, string, bool)>();
+        var res = new List<(CarPartNodeController, CarPartNames, string, bool, ScriptableCarIssue)>();
         var seen = new HashSet<IntPtr>();
         void AddIssue(ScriptableCarIssue issue, bool change)
         {
@@ -1086,7 +1086,8 @@ static class Core
                 if (c == null || !seen.Add(c.Pointer)) continue;
                 CarPartNames pn;
                 try { pn = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
-                if (pn == ap) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn)));   // sıvı her zaman doldurulur, değiştirilmez
+                // lastik arızası (affectedPart=Tire) teker noktasında: jant+lastik tek eşya (Döküm: RightBackTireIssue → wheelset:Wheel)
+                if (pn == ap || (ap == CarPartNames.Tire && pn == CarPartNames.Wheel)) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn), issue));   // sıvı her zaman doldurulur, değiştirilmez
             }
         }
         if (scen.serviceRequests != null)
@@ -1220,6 +1221,18 @@ static class Core
     }
 
     static int nextSbi = 900000 + new System.Random().Next(50000);
+
+    static List<int> BrokenSlots(ScriptableCarIssue iss)
+    {
+        var res = new List<int>();
+        try
+        {
+            var l = iss?.TryCast<ScriptableFuseSmallIssue>()?.brokenIndexes ?? iss?.TryCast<ScriptableFuseMidIssue>()?.brokenIndexes ?? iss?.TryCast<ScriptableFuseLargeIssue>()?.brokenIndexes;
+            if (l != null) for (int i = 0; i < l.Count; i++) res.Add(l[i]);
+        }
+        catch { }
+        return res;
+    }
 
     // Çok yuvalı noktalar (sigorta kutusu vb.): bütün noktayı başlatmak tutmazsa en düşük dayanıklı yuvayı tek değiştir.
     static (int Slot, InventoryItem Item, float Dur) WorstSlot(CarPartNodeController ctrl, CarPartNames? type = null)
@@ -1373,10 +1386,11 @@ static class Core
                     }
                     catch (Exception e) { names.Add("hata " + e.Message); }
                     string ap = "?"; try { ap = iss.affectedPart.ToString(); } catch { }
-                    Plugin.L.LogInfo($"      arıza {iss.name} ({iss.GetIl2CppType().Name}) affectedPart={ap} → {string.Join(", ", names)}");
+                    var bi = BrokenSlots(iss);
+                    Plugin.L.LogInfo($"      arıza {iss.name} ({iss.GetIl2CppType().Name}) affectedPart={ap}{(bi.Count > 0 ? " yanık yuva=" + string.Join(",", bi) : "")} → {string.Join(", ", names)}");
                 }
             }
-        foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
+        foreach (var (ctrl, pn, issue, change, src) in IssueTargets(car, scen))
         {
             var p = ctrl.GetPrimaryCarPart();
             string cur = "?", last = "?", inst = "?", t = "?";
@@ -1422,7 +1436,7 @@ static class Core
     {
         int fixedN = 0, already = 0, idx = -1;
         var failed = new List<string>();
-        foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
+        foreach (var (ctrl, pn, issue, change, src) in IssueTargets(car, scen))
         {
             if (only != null && !only.Contains(++idx)) continue;
             if (!change)
@@ -1453,20 +1467,22 @@ static class Core
             }
             if (pn is CarPartNames.FuseSmall or CarPartNames.FuseMid or CarPartNames.FuseLarge)
             {
-                // sigorta kutusu: ilk yuva sağlam olabilir; bozuk (en düşük dayanıklı) yuvayı bul ve onu değiştir
-                var (slot, slotItem, slotDur) = WorstSlot(ctrl, pn);
-                bool blown = false;   // yanık sigorta: dayanıklılık %100 görünür ama oyun "onarılmadı" der
-                try { blown = ServiceRequestSystem.GetNeededRepair(ctrl) && !ServiceRequestSystem.GetRepaired(ctrl); } catch { }
-                if (slot < 0 || (slotDur >= 0.999f && !blown)) { already++; continue; }
-                // yanık ama bu türde dayanıklılığı düşük yuva yok: hangi yuva olduğu bilinmiyor. Sağlam sigortayı sökmek
-                // yanlış işlem olur → dokunma, Döküm'deki yuva listesinden doğru kural bulunacak.
-                if (slotDur >= 0.999f) { failed.Add($"{pn} (yanık yuva belirlenemedi — Döküm'e bas)"); continue; }
-                int oldH = InventoryItemExtensions.GetHashSafe(slotItem);
-                var fc = Candidates(ctrl, pn, oldH).Where(i => itemHash[i.Pointer] != oldH).ToList();   // yanık eşyanın aynısı değil
-                if (fc.Count == 0) fc = Candidates(ctrl, pn).Where(i => itemHash[i.Pointer] != oldH).ToList();
-                if (fc.Count == 0) { failed.Add($"{pn} (uygun sigorta yok)"); continue; }
-                try { InstallSlot(ctrl, pn, fc[0], slot, slotItem); fixedN++; Plugin.L.LogInfo($"Onarım: {pn} yuva {slot} ← {fc[0].GetName}{(blown ? " (yanık)" : "")} [{issue}]"); }
-                catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
+                // yanık sigortanın yuvası arızada yazılı (brokenIndexes); dayanıklılık %100 görünür, o yüzden tahmin edilmez
+                var slots = BrokenSlots(src);
+                if (slots.Count == 0) { failed.Add($"{pn} (arızada yanık yuva yok — Döküm'e bas)"); continue; }
+                foreach (var slot in slots)
+                {
+                    InventoryItem slotItem = null, lastItem = null;
+                    try { var sp = ctrl.GetCarPartByIndex(slot); slotItem = sp.carPartItem.Value; lastItem = sp.lastRemovedCarPartItem.Value; } catch { }
+                    if (!ValidItem(slotItem)) { failed.Add($"{pn} (yuva {slot} okunamadı)"); continue; }
+                    // daha önce değiştirildiyse son sökülen farklı eşya (fabrikada ikisi de aynı sbi)
+                    if (ValidItem(lastItem) && lastItem.sessionBasedIndex != slotItem.sessionBasedIndex) { already++; continue; }
+                    int oldH = InventoryItemExtensions.GetHashSafe(slotItem);
+                    var fc = Candidates(ctrl, pn, oldH);   // aynı amper öncelikli
+                    if (fc.Count == 0) { failed.Add($"{pn} (uygun sigorta yok)"); continue; }
+                    try { InstallSlot(ctrl, pn, fc[0], slot, slotItem); fixedN++; Plugin.L.LogInfo($"Onarım: {pn} yuva {slot} ← {fc[0].GetName} [{fc[0].GetIdentical}] [{issue}]"); }
+                    catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
+                }
                 continue;
             }
             var cands = Candidates(ctrl, pn, CurrentHash(ctrl));   // eski parçayla aynı özellik öncelikli
@@ -1583,7 +1599,7 @@ static class Core
             if (targets.Count == 0) Lbl("   <color=#9aa0a6>Parça değişimi gerektiren arıza yok</color>");
             for (int i = 0; i < targets.Count; i++)
             {
-                var (ctrl, pn, issue, change) = targets[i];
+                var (ctrl, pn, issue, change, _) = targets[i];
                 H();
                 cx += 14;
                 bool on = sel.Contains(i);
