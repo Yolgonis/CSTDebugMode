@@ -1017,6 +1017,8 @@ static class Core
 
     // Senaryodaki arızalar → yalnızca arızanın affectedPart türündeki kontrol noktaları.
     // (issue.GetControllers bütün zinciri döndürüyor: tekerde göbek/balata/disk… Hepsine dokunmak "ekstra parça" bedeli yazar.)
+    static bool repairExtras;   // senaryonun müşteri istemediği ek arızalarını da onar
+
     static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
     {
         var res = new List<(CarPartNodeController, CarPartNames, string)>();
@@ -1041,7 +1043,8 @@ static class Core
         if (scen.serviceRequests != null)
             foreach (var req in scen.serviceRequests)
                 if (req?.carIssues != null) foreach (var issue in req.carIssues) AddIssue(issue);
-        if (scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue);
+        bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
+        if ((repairExtras || called) && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue);   // ek arızalar istenmemiş iş sayılabilir
         return res;
     }
 
@@ -1071,7 +1074,8 @@ static class Core
     static List<ScriptableCarPartItemBase> Candidates(CarPartNodeController ctrl, CarPartNames pn)
     {
         var ids = ctrl.compatibilityIds;
-        return Items().Where(i => PartOf(i) == pn && itemHash.ContainsKey(i.Pointer)
+        bool fuse = pn is CarPartNames.FuseSmall or CarPartNames.FuseMid or CarPartNames.FuseLarge;   // katalogda tek "Fuse" sınıfı; boyu uyumluluk seçer
+        return Items().Where(i => (fuse ? i.GetIl2CppType().Name == "ScriptableCarPartFuse" : PartOf(i) == pn) && itemHash.ContainsKey(i.Pointer)
                 && (ids == null || ids.Count == 0 || ids.Contains(i.compatibilityId)))
             .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
     }
@@ -1147,6 +1151,7 @@ static class Core
     static void DrawCars()
     {
         Sec($"Araçlar ({cars.Count})");
+        repairExtras = Tgl(repairExtras, "Onar: müşteri aranmamış olsa da ek arızaları onar (aranmışsa zaten dahil)");
         if (cars.Count == 0) { Lbl("<color=#9aa0a6>Sahnede müşteri aracı yok.</color>"); return; }
         var me = LocalPlayer();
         foreach (var car in cars)
