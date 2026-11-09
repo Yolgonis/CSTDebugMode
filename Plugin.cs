@@ -1121,47 +1121,82 @@ static class Core
             .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
     }
 
+    static bool ValidItem(InventoryItem it)
+    {
+        try { return it != null && it.ItemType != CarPartNames.NotImportant && InventoryItemExtensions.GetHashSafe(it) != -1; }
+        catch { return false; }
+    }
+
+    // UYARI: NetworkVariable<InventoryItem>.Value'ya interop üzerinden YAZMAK belleği bozuyor (Döküm: çöp owner/sbi).
+    // Bu yüzden eşya verisi yalnızca oyunun kendi metotlarıyla yazılır (InitializeWithData, envanter metotları).
     static void Install(CarPartNodeController ctrl, CarPartNames pn, ScriptableCarPartItemBase item, int count)
     {
         var p = ctrl.GetPrimaryCarPart();
         InventoryItem old = null;
         try { old = p.carPartItem.Value; } catch { }
+        int hash = itemHash[item.Pointer];
+        var pinv = Inv;
 
-        var inv = InventoryItem.empty;
-        inv.ItemType = pn;
-        try { inv.ItemOwner = OwnerName(); } catch { }
-        inv.sessionBasedIndex = nextSbi++;   // gerçek eşyaların hepsinde benzersiz; 0 = "geçersiz" sayılabiliyor
-        for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref inv, itemHash[item.Pointer], ScriptableCarPartItemBase.MaxDurability);
-        ctrl.InitializeWithData(inv, false);
-
-        // sökülen eski parça, elle değişimdeki gibi oyuncu envanterine düşsün
-        try
+        // 1) Yeni eşyayı gerçek envanterden al: oyun kendi sessionBasedIndex/owner'ını versin (elle takmadaki veri akışı)
+        InventoryItem neu = null;
+        bool fromInv = false;
+        if (pinv != null && count == 1)
         {
-            if (old != null && old.ItemType != CarPartNames.NotImportant && InventoryItemExtensions.GetHashSafe(old) != -1)
+            try
             {
-                var pinv = Inv;
-                if (pinv != null) { pinv.AddCarPartItemWithCarPartName(pn, old, OwnerName()); Plugin.L.LogInfo($"Envantere: sökülen {pn}"); }
+                int before = NewestSbi(pinv, pn, hash, out _);
+                pinv.AddItemToInventory(pn, item);
+                if (NewestSbi(pinv, pn, hash, out var found) > before && found != null) { neu = found; fromInv = true; }
             }
+            catch (Exception e) { Plugin.L.LogWarning("Envanterden eşya: " + e.Message); }
         }
-        catch (Exception e) { Plugin.L.LogWarning("Envantere ekleme: " + e.Message); }
-
-        // Oyun değişimi "son sökülen = eski parça" ile anlıyor (Döküm: elle değişimde last=eski bozuk parça).
-        // InitializeWithData(…, true) last'a YENİ parçayı yazıyordu → oyun "değişim yok" diyordu.
-        try
+        if (neu == null)   // çok parçalı nokta (buji vb.) veya envanter yoksa: sentetik eşya
         {
-            if (old != null && old.ItemType != CarPartNames.NotImportant && InventoryItemExtensions.GetHashSafe(old) != -1)
-                p.lastRemovedCarPartItem.Value = old;
+            neu = InventoryItem.empty;
+            neu.ItemType = pn;
+            try { neu.ItemOwner = OwnerName(); } catch { }
+            neu.sessionBasedIndex = nextSbi++;
+            for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref neu, hash, ScriptableCarPartItemBase.MaxDurability);
         }
-        catch (Exception e) { Plugin.L.LogWarning("lastRemoved: " + e.Message); }
+
+        // 2) "son sökülen" = eski parça — oyunun kendi yazımıyla (setLastRemoved=true geçilen eşyayı last yapar)
+        if (ValidItem(old)) ctrl.InitializeWithData(old, true);
+        // 3) yeni parçayı tak (last'a dokunma)
+        ctrl.InitializeWithData(neu, false);
+        // 4) takılan eşya envanterden düşsün
+        if (fromInv) { try { pinv.DeleteCarPartItemServer(pn, neu, false); } catch (Exception e) { Plugin.L.LogWarning("Envanterden düşme: " + e.Message); } }
+        // 5) sökülen eski parça envantere
+        if (ValidItem(old) && pinv != null)
+        {
+            try { pinv.AddCarPartItemWithCarPartName(pn, old, OwnerName()); Plugin.L.LogInfo($"Envantere: sökülen {pn}"); }
+            catch (Exception e) { Plugin.L.LogWarning("Envantere ekleme: " + e.Message); }
+        }
         try { if (!p.isInstalled.Value) p.isInstalled.Value = true; } catch (Exception e) { Plugin.L.LogWarning("isInstalled: " + e.Message); }
         try { p.OnInstalledServer(); } catch (Exception e) { Plugin.L.LogWarning("OnInstalledServer: " + e.Message); }
         try { ctrl.ItemInstalled(); } catch (Exception e) { Plugin.L.LogWarning("ItemInstalled: " + e.Message); }
     }
 
+    // Envanterde bu modelin en yeni (en büyük sbi) eşyası; AddItemToInventory sonrası eklenen eşyayı bulmak için
+    static int NewestSbi(PlayersInventory pinv, CarPartNames pn, int hash, out InventoryItem newest)
+    {
+        newest = null;
+        int best = int.MinValue;
+        var map = pinv.ItemMap;
+        if (map == null || !map.ContainsKey(pn)) return best;
+        var list = map[pn];
+        for (int i = 0; i < list.Count; i++)
+        {
+            var it = list[i];
+            if (it == null || InventoryItemExtensions.GetHashSafe(it) != hash) continue;
+            if (it.sessionBasedIndex > best) { best = it.sessionBasedIndex; newest = it; }
+        }
+        return best;
+    }
+
     static int nextSbi = 900000 + new System.Random().Next(50000);
 
-    // Parça zaten doğru ama oyunun değişim izi eksikse (eski sürümün bıraktığı durum) izi tamamlar.
-    // Yeni gelen araçta last = aynı modelin bozuk kopyası (farklı sbi); tamir sonrası last = eski bozuk parça.
+    // Önceki sürümlerin bıraktığı bozuk izi temizler: "takılı" bayrağı ve çöp/boş "son sökülen".
+    // Yalnızca oyunun kendi yazım yolları kullanılır.
     static bool FixTrace(CarPartNodeController ctrl)
     {
         var p = ctrl.GetPrimaryCarPart();
@@ -1169,24 +1204,10 @@ static class Core
         try { if (!p.isInstalled.Value) { p.isInstalled.Value = true; changed = true; } } catch { }
         try
         {
-            var cur = p.carPartItem.Value;
-            if (cur.sessionBasedIndex == 0) { cur.sessionBasedIndex = nextSbi++; p.carPartItem.Value = cur; changed = true; }
-            var last = p.lastRemovedCarPartItem.Value;
-            bool lastIsCur = last == null || last.ItemType == CarPartNames.NotImportant
-                || (InventoryItemExtensions.GetHashSafe(last) == InventoryItemExtensions.GetHashSafe(cur)
-                    && InventoryItemExtensions.GetNormalizedDurability(last) >= 0.999f);
-            if (lastIsCur)
+            if (!ValidItem(p.lastRemovedCarPartItem.Value))
             {
-                // .Value kopyasında ref/ItemOwner="" yazmak belleği bozdu (Döküm'de çöp owner/sbi).
-                // Install ile aynı, kanıtlanmış yoldan sıfırdan kur: empty + ItemType + AddPart + sbi.
-                int h = InventoryItemExtensions.GetHashSafe(cur);
-                var broken = InventoryItem.empty;
-                broken.ItemType = cur.ItemType;
-                broken.sessionBasedIndex = nextSbi++;
-                int n = PartCount(ctrl);
-                for (int i = 0; i < n; i++) InventoryItemExtensions.AddPart(ref broken, h, ScriptableCarPartItemBase.MaxDurability * 0.1f);
-                p.lastRemovedCarPartItem.Value = broken;
-                changed = true;
+                var cur = p.carPartItem.Value;
+                if (ValidItem(cur)) { ctrl.InitializeWithData(cur, true); changed = true; Plugin.L.LogInfo("Bozuk 'son sökülen' kaydı temizlendi"); }
             }
         }
         catch (Exception e) { Plugin.L.LogWarning("FixTrace: " + e.Message); }
