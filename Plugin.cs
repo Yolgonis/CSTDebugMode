@@ -150,7 +150,7 @@ static class Core
         EnsureMessaging();
         if (!menu) return;
         targets.RemoveAll(t => t.C == null);   // OnGUI'de silmek IMGUI kontrol sayısını bozar
-        if ((snapTimer -= Time.unscaledDeltaTime) <= 0f) { snapTimer = 0.5f; Snapshot(); RefreshValues(); }
+        if ((snapTimer -= Time.unscaledDeltaTime) <= 0f) { snapTimer = 0.5f; Snapshot(); RefreshValues(); if (tab == 0) RefreshWorld(); }
         Raycast();
     }
 
@@ -179,6 +179,18 @@ static class Core
         menu = !menu;
         if (menu) { prevLock = Cursor.lockState; prevVisible = Cursor.visible; }
         else { Cursor.lockState = prevLock; Cursor.visible = prevVisible; }
+        if (lockInput || inputLocked) SetPlayerInput(!menu);
+    }
+
+    // Menü açıkken karakter yürümesin/kamera dönmesin (metin yazarken tuşlar oyuna gitmesin).
+    static bool lockInput = true, inputLocked;
+
+    static void SetPlayerInput(bool active)
+    {
+        var sp = LocalPlayer()?.GetComponentInChildren<SinglePlayer>(true);
+        if (sp == null) { inputLocked = false; return; }
+        sp.SetMovementInputActive(active, !active);
+        inputLocked = !active;
     }
 
     static void OnLog(string cond, string stack, LogType type)
@@ -937,6 +949,13 @@ static class Core
                 for (int i = 0; i < n; i++) inv.AddItemToInventory(part.Value, item);
                 return $"{n}x {item.GetName} envantere eklendi";
             }
+            case "repair":
+            {
+                var car = CarById(arg);
+                return car == null ? "araç bulunamadı" : RepairCar(car);
+            }
+            case "fastcargo":
+                return SetFastCargo(arg == "1");
         }
         return "bilinmeyen test komutu: " + op;
     }
@@ -945,6 +964,132 @@ static class Core
     {
         if (PureClient) { Send(NetworkManager.ServerClientId, $"game\t{op}\t{Clean(arg)}"); Toast("Host'a gönderildi"); }
         else Toast(SafeRun(() => GameCmd(op, arg)));
+    }
+
+    // ── araçlar ──
+    static readonly List<Car> cars = new();
+    static readonly List<ABuildingSlot> slots2 = new();
+    static readonly HashSet<ulong> carOpen = new();
+
+    static void RefreshWorld()
+    {
+        cars.Clear();
+        foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<Car>(), FindObjectsSortMode.None)) { var c = o.TryCast<Car>(); if (c != null) cars.Add(c); }
+        slots2.Clear();
+        foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<ABuildingSlot>(), FindObjectsSortMode.None)) { var s = o.TryCast<ABuildingSlot>(); if (s != null) slots2.Add(s); }
+    }
+
+    static IEnumerable<(ACarPartNodeProcess Proc, CarPartNodeController Ctrl)> Controllers(Car car)
+    {
+        foreach (var proc in car.GetComponentsInChildren<ACarPartNodeProcess>(true))
+        {
+            var ctrls = proc.GetCarPartControllers();
+            if (ctrls == null) continue;
+            foreach (var c in ctrls) if (c != null) yield return (proc, c);
+        }
+    }
+
+    // Oyunun arıza oluşturduğu çağrıyla (ApplyDurabilityIssue) her parçayı maksimum dayanıklılığa çeker. Host'ta çalışır.
+    static string RepairCar(Car car)
+    {
+        float max = ScriptableCarPartItemBase.MaxDurability;
+        int ok = 0, fail = 0;
+        foreach (var (proc, ctrl) in Controllers(car).ToList())
+            for (int i = 0; i < 16; i++)
+            {
+                CarPart part;
+                try { part = ctrl.GetCarPartByIndex(i); } catch { break; }
+                if (part == null) break;
+                try { proc.ApplyDurabilityIssue(part.GetCarPartName(), max, false, i); ok++; }
+                catch (Exception e) { fail++; Plugin.L.LogWarning($"Onarım {part.GetCarPartName()}: {e.Message}"); }
+            }
+        return $"{ok} parça onarıldı" + (fail > 0 ? $", {fail} hata (log)" : "") + " — sıvılar ayrıca doldurulmalı olabilir";
+    }
+
+    static Car CarById(string nid)
+    {
+        var sm = NM?.SpawnManager;
+        if (sm == null || !ulong.TryParse(nid, out var id) || !sm.SpawnedObjects.ContainsKey(id)) return null;
+        return sm.SpawnedObjects[id].GetComponent<Car>();
+    }
+
+    static string Yn(Func<bool> f) { try { return f() ? "evet" : "hayır"; } catch { return "?"; } }
+
+    static void DrawCars()
+    {
+        Sec($"Araçlar ({cars.Count})");
+        if (cars.Count == 0) { Lbl("<color=#9aa0a6>Sahnede müşteri aracı yok.</color>"); return; }
+        var me = LocalPlayer();
+        foreach (var car in cars)
+        {
+            if (car == null) continue;
+            ulong id = car.NetworkObjectId;
+            string name = "?", scen = "?";
+            try { name = car.GetCustomerName; } catch { }
+            try { scen = car.CarServiceScenario != null ? car.CarServiceScenario.name : "-"; } catch { }
+            bool open = carOpen.Contains(id);
+            H();
+            if (Pill(Next(26, LineH), open ? "-" : "+", open)) { if (open) carOpen.Remove(id); else carOpen.Add(id); }
+            Lbl($"<b>{name}</b> <color=#9aa0a6>#{id} • {scen}</color>", 300);
+            Lbl(me != null ? $"{Vector3.Distance(me.transform.position, car.transform.position):0} m" : "", 50);
+            if (Btn("Git", 40)) Teleport(car.transform.position + car.transform.right * 2.5f + Vector3.up);
+            if (Btn("Onar", 50)) Game("repair", id.ToString());
+            EH();
+            if (!open) continue;
+            Lbl($"   Teslim günü: {car.GetExpectedDeliveryDay}   Teslim alanında: {Yn(() => car.GetIsInDeliveryArea())}   Müşteri arandı: {Yn(() => car.GetIsCustomerCalled)}");
+            foreach (var (proc, ctrl) in Controllers(car))
+            {
+                string part = "?", state;
+                try { var p = ctrl.GetPrimaryCarPart(); part = p != null ? p.GetCarPartName().ToString() : ctrl.name; } catch { }
+                try
+                {
+                    bool need = ServiceRequestSystem.GetNeededRepair(ctrl), done = ServiceRequestSystem.GetRepaired(ctrl);
+                    state = done ? "<color=#5fd068>onarıldı</color>" : need ? "<color=#ff6060>arızalı</color>" : "<color=#9aa0a6>sorun yok</color>";
+                }
+                catch { state = "?"; }
+                H();
+                Lbl($"      {part}", 260);
+                Lbl($"<color=#9aa0a6>{proc.GetIl2CppType().Name.Replace("CarPartNodeProcess", "")}</color>", 140);
+                Lbl(state, 120);
+                EH();
+            }
+        }
+    }
+
+    static void DrawBuildings()
+    {
+        Sec($"Binalar ({slots2.Count})");
+        if (slots2.Count == 0) { Lbl("<color=#9aa0a6>Bina slotu bulunamadı.</color>"); return; }
+        Lbl("<color=#9aa0a6>Yükselt, oyunun normal yükseltmesini çağırır (para/itibar gerekir — yukarıdan ekleyebilirsin).</color>");
+        foreach (var s in slots2)
+        {
+            if (s == null) continue;
+            string label;
+            try
+            {
+                var d = s.buildingSlotData.Value;
+                label = d.isNull ? "<color=#9aa0a6>boş slot</color>" : $"{(d.Data != null ? d.Data.name : "?")}  •  seviye {d.GetCurrentLevel()}";
+            }
+            catch (Exception e) { label = "? " + e.Message; }
+            H();
+            Lbl($"#{s.NetworkObjectId}  {label}", 420);
+            if (Btn("Yükselt", 70)) { try { s.TryToUpgradeServerRpc(default); Toast("Yükseltme istendi"); } catch (Exception e) { Toast("hata: " + e.Message); } }
+            if (Btn("Git", 40)) Teleport(s.transform.position + Vector3.up * 1.5f + s.transform.forward * 2f);
+            EH();
+        }
+    }
+
+    // ── market ──
+    static bool fastCargo;
+    static float[] cargoOrig;
+
+    static string SetFastCargo(bool on)
+    {
+        if (on && cargoOrig == null) cargoOrig = new[] { PlayersMarket.maxDeliveryTime, PlayersMarket.defaultDeliveryTime, PlayersMarket.deliveryTimePerKG };
+        if (on) { PlayersMarket.maxDeliveryTime = 1f; PlayersMarket.defaultDeliveryTime = 1f; PlayersMarket.deliveryTimePerKG = 0f; }
+        else if (cargoOrig != null) { PlayersMarket.maxDeliveryTime = cargoOrig[0]; PlayersMarket.defaultDeliveryTime = cargoOrig[1]; PlayersMarket.deliveryTimePerKG = cargoOrig[2]; }
+        fastCargo = on;
+        return on ? "Anında kargo açık (yeni siparişler için)" : "Kargo süreleri normale döndü";
     }
 
     static void DrawTest()
@@ -969,7 +1114,12 @@ static class Core
         Sec("İş akışı");
         H();
         if (Btn("Yeni müşteri aracı getir")) Game("spawn", "");
+        bool fast = fastCargo;
+        if (Tgl(fast, "Anında kargo (market)") != fast) Game("fastcargo", fast ? "0" : "1");
         EH();
+
+        DrawCars();
+        DrawBuildings();
 
         Sec("Zaman");
         var clock = Clock;
@@ -1067,6 +1217,9 @@ static class Core
 
     static void DrawGeneral()
     {
+        Sec("Menü");
+        bool li = Tgl(lockInput, "Menü açıkken karakteri ve kamerayı kilitle (yazarken tuşlar oyuna gitmez)");
+        if (li != lockInput) { lockInput = li; SetPlayerInput(!li); }
         Sec("Grafik");
         Lbl($"API: <b>{SystemInfo.graphicsDeviceType}</b>   GPU: {SystemInfo.graphicsDeviceName}   VRAM: {SystemInfo.graphicsMemorySize} MB");
         Lbl($"Çözünürlük: {Screen.width}x{Screen.height}   Sahne: {SceneManager.GetActiveScene().name}");
