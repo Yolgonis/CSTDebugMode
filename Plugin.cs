@@ -1097,11 +1097,27 @@ static class Core
             Il2CppSystem.Collections.Generic.List<CarPartNodeController> cs = null;
             try { cs = issue.GetControllers(car); } catch { }
             if (cs == null) return;
+            bool matched = false;
             foreach (var c in cs)
             {
-                if (c == null || !seen.Add(c.Pointer)) continue;
+                CarPartNames cp;
+                try { cp = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
+                if (cp == ap || (ap == CarPartNames.Tire && cp == CarPartNames.Wheel)) { matched = true; break; }
+            }
+            foreach (var c in cs)
+            {
+                if (c == null) continue;
                 CarPartNames pn;
                 try { pn = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
+                if (!matched)
+                {
+                    // arıza türü hiçbir noktayla eşleşmedi (ör. şanzıman): oyunun "onarım gerekiyor" dediği noktaları al
+                    bool needRep = false; try { needRep = ServiceRequestSystem.GetNeededRepair(c) && !ServiceRequestSystem.GetRepaired(c); } catch { }
+                    if (!needRep || NotSwappable.Contains(pn) || !seen.Add(c.Pointer)) continue;
+                    res.Add((c, pn, issue.name, change && !Liquids.Contains(pn), issue, req));
+                    continue;
+                }
+                if (!seen.Add(c.Pointer)) continue;
                 // lastik arızası (affectedPart=Tire) teker noktasında: jant+lastik tek eşya (Döküm: RightBackTireIssue → wheelset:Wheel)
                 if (pn == ap || (ap == CarPartNames.Tire && pn == CarPartNames.Wheel)) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn), issue, req));   // sıvı her zaman doldurulur, değiştirilmez
             }
@@ -1116,7 +1132,7 @@ static class Core
                 }
         bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
         bool noExtras = RulesOf(scen).Contains(ServiceRequestCustomerRules.NoExtraFixes);   // müşteri ek tamir istemiyor → bedel yazılır
-        if ((repairExtras || called) && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, !(issue?.name ?? "").Contains("Charge", StringComparison.OrdinalIgnoreCase), null);   // isteği olmayan ek arıza: "Charge…" şarj, gerisi değişim
+        if (repairExtras && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, !(issue?.name ?? "").Contains("Charge", StringComparison.OrdinalIgnoreCase), null);   // isteği olmayan ek arıza: "Charge…" şarj, gerisi değişim
         return res;
     }
 
@@ -1704,6 +1720,8 @@ static class Core
             catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
         }
 
+        if (only == null) fixedN += VerifyPass(car, scen, failed);
+
         // kaporta: paslı parçaları temizle + boyalı say, yıkama istendiyse yıka
         string body = "";
         if (only == null || only.Contains(BodyIdx))
@@ -1711,7 +1729,9 @@ static class Core
         {
             var layer = car.carBodyLayerController;
             var rust = scen.rustyParts;
-            if (layer != null && rust != BodyPartTypes.None)
+            bool rustDone = false;
+            try { rustDone = (layer.GetRustyParts & rust) == 0 && (layer.GetPaintedParts & rust) == rust; } catch { }
+            if (layer != null && rust != BodyPartTypes.None && !rustDone)
             {
                 layer.SetRustyParts(BodyPartTypes.None);
                 layer.AddGrindParts(rust);
@@ -1865,6 +1885,128 @@ static class Core
         return "araç kaldırıldı";
     }
 
+    // ── 2. tur: oyunun kendi puanı (Validate) ile doğrulama ──
+    // %100 olmayan her değişim isteği için o isteğin noktalarında katalogdaki adaylar sırayla denenir; puanı artıran tutulur,
+    // hiçbiri artırmazsa nokta eski hâline döner. Tahmin filtrelerinin bilmediği istek türlerini (inç, tip, vites…) böyle çözer.
+    static int VerifyPass(Car car, ScriptableCarServiceScenario scen, List<string> failed)
+    {
+        int n = 0;
+        if (scen.serviceRequests == null) return 0;
+        var targets = IssueTargets(car, scen);
+        foreach (var r in scen.serviceRequests)
+        {
+            if (r == null || (ReqScore(car, r) ?? 0f) >= 0.999f) continue;
+            if (r.TryCast<ScriptablePaintBodyPartServiceRequest>() != null) continue;
+            bool change = true; try { change = r.NeedChangeCarPart(); } catch { }
+            if (change)
+                foreach (var (ctrl, pn, _, _, _, req) in targets)
+                {
+                    if (req == null || req.Pointer != r.Pointer) continue;
+                    if (Liquids.Contains(pn) || pn is CarPartNames.FuseSmall or CarPartNames.FuseMid or CarPartNames.FuseLarge) continue;
+                    if ((ReqScore(car, r) ?? 0f) >= 0.999f) break;
+                    try { if (pn == CarPartNames.Wheel ? SearchWheel(car, r, ctrl) : SearchPart(car, r, ctrl, pn)) n++; }
+                    catch (Exception e) { Plugin.L.LogWarning($"Doğrulama {pn}: {e.Message}"); }
+                }
+            float after = ReqScore(car, r) ?? 0f;
+            if (after < 0.999f) failed.Add($"{r.name} oyuna göre %{after * 100:0}");
+        }
+        return n;
+    }
+
+    // Değişim izini (son sökülen = asıl eski parça) bir kez kur; denemeler yalnızca takılı eşyayı değiştirir.
+    static void EnsureTrace(CarPartNodeController ctrl, InventoryItem orig)
+    {
+        try
+        {
+            var last = ctrl.GetPrimaryCarPart().lastRemovedCarPartItem.Value;
+            if (!ValidItem(last) || last.sessionBasedIndex == orig.sessionBasedIndex)
+            {
+                ctrl.InitializeWithData(orig, true);
+                try { Inv?.AddCarPartItemWithCarPartName(orig.ItemType, orig, OwnerName()); } catch { }
+            }
+        }
+        catch { }
+    }
+
+    static void PutHashes(CarPartNodeController ctrl, CarPartNames pn, IList<int> hashes)
+    {
+        var neu = InventoryItem.empty;
+        neu.ItemType = pn;
+        try { neu.ItemOwner = OwnerName(); } catch { }
+        neu.sessionBasedIndex = nextSbi++;
+        foreach (var h in hashes) InventoryItemExtensions.AddPart(ref neu, h, ScriptableCarPartItemBase.MaxDurability);
+        ctrl.InitializeWithData(neu, false);
+    }
+
+    static bool SearchPart(Car car, AScriptableServiceRequest r, CarPartNodeController ctrl, CarPartNames pn)
+    {
+        var orig = CurrentItem(ctrl);
+        if (!ValidItem(orig)) return false;
+        int count = Math.Max(1, PartCount(ctrl));
+        float best = ReqScore(car, r) ?? 0f, start = best;
+        var pool = Items().Where(i => PartOf(i) == pn && itemHash.ContainsKey(i.Pointer))
+            .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).Take(60).ToList();
+        if (pool.Count == 0) return false;
+        ScriptableCarPartItemBase win = null;
+        EnsureTrace(ctrl, orig);
+        foreach (var c in pool)
+        {
+            PutHashes(ctrl, pn, Enumerable.Repeat(itemHash[c.Pointer], count).ToList());
+            float v = ReqScore(car, r) ?? 0f;
+            if (v > best + 0.001f) { best = v; win = c; if (best >= 0.999f) break; }
+        }
+        if (win == null) { ctrl.InitializeWithData(orig, false); return false; }
+        PutHashes(ctrl, pn, Enumerable.Repeat(itemHash[win.Pointer], count).ToList());
+        Plugin.L.LogInfo($"Doğrulama: {pn} ← {win.GetName} ({win.rarity}) [{r.name}: %{start * 100:0} → %{best * 100:0}]");
+        return true;
+    }
+
+    static bool SearchWheel(Car car, AScriptableServiceRequest r, CarPartNodeController ctrl)
+    {
+        var orig = CurrentItem(ctrl);
+        if (!ValidItem(orig)) return false;
+        var hashes = new List<int>();
+        for (int i = 0; i < 8; i++)
+        {
+            int h; try { h = InventoryItemExtensions.GetHashSafe(orig, i); } catch { break; }
+            if (h == 0 || h == -1) break;
+            hashes.Add(h);
+        }
+        if (hashes.Count == 0) return false;
+        ScriptableCarPartItemBase Def(int h) => Items().FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var x) && x == h);
+        int ri = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartRim");
+        int ti = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
+        List<ScriptableCarPartItemBase> Pool(string cls) => Items().Where(i => i.GetIl2CppType().Name == cls && itemHash.ContainsKey(i.Pointer))
+            .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
+        var rims = ri >= 0 ? Pool("ScriptableCarPartRim") : new List<ScriptableCarPartItemBase>();
+        var tires = ti >= 0 ? Pool("ScriptableCarPartTire") : new List<ScriptableCarPartItemBase>();
+        float best = ReqScore(car, r) ?? 0f, start = best;
+        List<int> win = null;
+        EnsureTrace(ctrl, orig);
+        bool Try(List<int> hs)
+        {
+            PutHashes(ctrl, CarPartNames.Wheel, hs);
+            float v = ReqScore(car, r) ?? 0f;
+            if (v > best + 0.001f) { best = v; win = hs; }
+            return best >= 0.999f;
+        }
+        // önce yalnız lastik, sonra yalnız jant, en son jant + aynı ölçüde lastik
+        foreach (var t in tires) { var hs = hashes.ToList(); hs[ti] = itemHash[t.Pointer]; if (Try(hs)) break; }
+        if (best < 0.999f) foreach (var rm in rims) { var hs = hashes.ToList(); hs[ri] = itemHash[rm.Pointer]; if (Try(hs)) break; }
+        if (best < 0.999f && ri >= 0 && ti >= 0)
+            foreach (var rm in rims)
+            {
+                var t = tires.FirstOrDefault(x => Math.Abs(x.identicalValue - rm.identicalValue) < 0.01f);
+                if (t == null) continue;
+                var hs = hashes.ToList(); hs[ri] = itemHash[rm.Pointer]; hs[ti] = itemHash[t.Pointer];
+                if (Try(hs)) break;
+            }
+        if (win == null) { ctrl.InitializeWithData(orig, false); return false; }
+        PutHashes(ctrl, CarPartNames.Wheel, win);
+        Plugin.L.LogInfo($"Doğrulama: Wheel ← {string.Join(" + ", win.Select(h => Def(h)?.GetName ?? "#" + h))} [{r.name}: %{start * 100:0} → %{best * 100:0}]");
+        return true;
+    }
+
     static Car CarById(string nid)
     {
         var sm = NM?.SpawnManager;
@@ -1998,7 +2140,7 @@ static class Core
         }
         if (!any) Lbl("<color=#9aa0a6>Bu grupta araç yok.</color>");
         Space(6);
-        repairExtras = Tgl(repairExtras, "Onar müşterinin istemediği ek arızaları da yapsın (kapalıyken yalnızca müşteri arandıysa)");
+        repairExtras = Tgl(repairExtras, "Müşterinin istemediği ek arızaları da onar (teslimde Extra part Cost yazılır — normalde kapalı bırak)");
     }
 
     static void DrawBuildings()
