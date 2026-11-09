@@ -1140,7 +1140,7 @@ static class Core
         try { ctrl.ItemInstalled(); } catch (Exception e) { Plugin.L.LogWarning("ItemInstalled: " + e.Message); }
     }
 
-    static int nextSbi = 900000 + UnityEngine.Random.Range(0, 50000);
+    static int nextSbi = 900000 + new System.Random().Next(50000);
 
     static string OwnerName()
     {
