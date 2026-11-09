@@ -962,6 +962,11 @@ static class Core
                 var car = CarById(arg);
                 return car == null ? "araç bulunamadı" : RepairCar(car);
             }
+            case "dump":
+            {
+                var car = CarById(arg);
+                return car == null ? "araç bulunamadı" : DumpCar(car);
+            }
             case "fastcargo":
                 return SetFastCargo(arg == "1");
         }
@@ -1113,8 +1118,46 @@ static class Core
     {
         var inv = InventoryItem.empty;
         inv.ItemType = pn;
+        try { inv.ItemOwner = OwnerName(); } catch { }   // oyuncunun taktığı parça izi (orijinal parçada boş)
         for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref inv, itemHash[item.Pointer], ScriptableCarPartItemBase.MaxDurability);
         ctrl.InitializeWithData(inv, true);   // true: eskisi "son sökülen" olur, gerçek değişim gibi
+        // normal takmada tetiklenen "takıldı" olayları; servis takibi bunları dinliyor olabilir
+        try { ctrl.GetPrimaryCarPart()?.OnInstalledServer(); } catch (Exception e) { Plugin.L.LogWarning("OnInstalledServer: " + e.Message); }
+        try { ctrl.ItemInstalled(); } catch (Exception e) { Plugin.L.LogWarning("ItemInstalled: " + e.Message); }
+    }
+
+    static string OwnerName()
+    {
+        try { return Steamworks.SteamFriends.GetPersonaName(); } catch { return "Player"; }
+    }
+
+    // Arızalı noktaların oyunun tuttuğu bütün izlerini log'a yazar: elle değişim ile Onar'ı karşılaştırmak için.
+    static string DumpCar(Car car)
+    {
+        var scen = car.CarServiceScenario;
+        if (scen == null) return "senaryo yok";
+        string It(InventoryItem it)
+        {
+            if (it == null) return "null";
+            try { return $"hash={InventoryItemExtensions.GetHashSafe(it)} dur={InventoryItemExtensions.GetNormalizedDurability(it):0.###} owner='{it.ItemOwner?.ToString()}' sbi={it.sessionBasedIndex} type={it.ItemType}"; }
+            catch (Exception e) { return "? " + e.Message; }
+        }
+        string B(Func<bool> f) { try { return f() ? "T" : "f"; } catch { return "?"; } }
+        Plugin.L.LogInfo($"── DÖKÜM #{car.NetworkObjectId} {car.GetCustomerName} • müşteri arandı={B(() => car.GetIsCustomerCalled)}");
+        if (scen.serviceRequests != null)
+            foreach (var r in scen.serviceRequests) if (r != null) Plugin.L.LogInfo($"   istek {r.name}: change={B(() => r.NeedChangeCarPart())} validate={ReqScore(car, r)}");
+        foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
+        {
+            var p = ctrl.GetPrimaryCarPart();
+            string cur = "?", last = "?", inst = "?", t = "?";
+            try { cur = It(p.carPartItem.Value); } catch { }
+            try { last = It(p.lastRemovedCarPartItem.Value); } catch { }
+            try { inst = p.isInstalled.Value ? "T" : "f"; } catch { }
+            try { t = p.lastProcessFinishTime.Value.ToString("0.0"); } catch { }
+            Plugin.L.LogInfo($"   {pn} [{issue}] change={change} need={B(() => ServiceRequestSystem.GetNeededRepair(ctrl))} rep={B(() => ServiceRequestSystem.GetRepaired(ctrl))} "
+                + $"liqNeed={B(() => ServiceRequestSystem.GetLiquidNeededRepair(ctrl))} liqRep={B(() => ServiceRequestSystem.GetLiquidRepaired(ctrl))} installed={inst} lastT={t}\n      cur: {cur}\n      last: {last}");
+        }
+        return "Döküm log'a yazıldı";
     }
 
     // Senaryodaki arızalı parçaları uyumlu en yüksek nadirlikteki eşyayla değiştirir. Aynı eşya zaten takılıysa dokunmaz
@@ -1213,6 +1256,7 @@ static class Core
             Lbl(me != null ? $"{Vector3.Distance(me.transform.position, car.transform.position):0} m" : "", 50);
             if (Btn("Git", 40)) Teleport(car.transform.position + car.transform.right * 2.5f + Vector3.up);
             if (Btn("Onar", 50)) Game("repair", id.ToString());
+            if (Btn("Döküm", 60)) Game("dump", id.ToString());
             EH();
             if (!open) continue;
             Lbl($"   Teslim günü: {car.GetExpectedDeliveryDay}   Teslim alanında: {Yn(() => car.GetIsInDeliveryArea())}   Müşteri arandı: {Yn(() => car.GetIsCustomerCalled)}");
