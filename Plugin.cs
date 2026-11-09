@@ -656,6 +656,7 @@ static class Core
     {
         if (!inRow) { var full = new Rect(lx, cy, lw, h); cy += h + Gap; return full; }
         if (w <= 0) w = Mathf.Max(40f, lx + lw - cx);   // satırın kalanı
+        else if (cx > lx && cx + w > lx + lw) { cy += rowH + Gap; cx = lx; rowH = LineH; }   // sığmazsa alt satıra sar
         var r = new Rect(cx, cy, w, h);
         cx += w + Gap;
         rowH = Mathf.Max(rowH, h);
@@ -990,22 +991,79 @@ static class Core
         EH();
         var list = Items();
         if (list.Count == 0) { Lbl("Parça kataloğu henüz yüklenmedi (oyuna girince dolar)."); return; }
-        int shown = 0;
-        foreach (var it in list)
+        if (itemInfo == null || itemInfo.Count != list.Count)
+            itemInfo = list.Select(i => (Cls: i.GetIl2CppType().Name.Replace("ScriptableCarPart", ""), Rarity: i.rarity.ToString())).ToList();
+
+        // kategori
+        H();
+        if (Pill(Next(TextW("Tümü"), LineH), "Tümü", itemCat == null)) itemCat = null;
+        foreach (var c in itemInfo.Select(x => x.Cls).Distinct().OrderBy(x => x))
+            if (Pill(Next(TextW(c), LineH), c, itemCat == c)) itemCat = itemCat == c ? null : c;
+        EH();
+        // nadirlik + seçenekler
+        H();
+        Lbl("Nadirlik:", 64);
+        if (Pill(Next(TextW("Tümü"), LineH), "Tümü", itemRarity == null)) itemRarity = null;
+        foreach (var r in itemInfo.Select(x => x.Rarity).Distinct().OrderBy(x => x))
+            if (Pill(Next(TextW(r), LineH), r, itemRarity == r)) itemRarity = itemRarity == r ? null : r;
+        EH();
+        H();
+        itemUnlockedOnly = Tgl(itemUnlockedOnly, "Sadece itibarım yetenler");
+        Lbl("Sırala:", 50);
+        foreach (var (k, label) in new[] { (0, "Ad"), (1, "Fiyat artan"), (2, "Fiyat azalan"), (3, "İtibar") })
+            if (Pill(Next(TextW(label), LineH), label, itemSort == k)) itemSort = k;
+        EH();
+
+        int rep = Inv != null ? Inv.GetReputationPoints : int.MaxValue;
+        var rows = Enumerable.Range(0, list.Count).Where(i =>
         {
-            var name = it.GetName ?? "?";
-            var cls = it.GetIl2CppType().Name.Replace("ScriptableCarPart", "");
-            if (itemQuery.Length > 0 && name.IndexOf(itemQuery, StringComparison.OrdinalIgnoreCase) < 0
-                && cls.IndexOf(itemQuery, StringComparison.OrdinalIgnoreCase) < 0) continue;
-            if (++shown > 120) { Lbl("<color=#9aa0a6>… daha fazlası için aramayı daralt</color>"); break; }
+            var it = list[i];
+            var (cls, rarity) = itemInfo[i];
+            if (itemCat != null && cls != itemCat) return false;
+            if (itemRarity != null && rarity != itemRarity) return false;
+            if (itemUnlockedOnly && it.GetRequiredReputationPoints > rep) return false;
+            return itemQuery.Length == 0 || (it.GetName ?? "").IndexOf(itemQuery, StringComparison.OrdinalIgnoreCase) >= 0
+                || cls.IndexOf(itemQuery, StringComparison.OrdinalIgnoreCase) >= 0;
+        });
+        rows = itemSort switch
+        {
+            1 => rows.OrderBy(i => list[i].GetBuyPrice),
+            2 => rows.OrderByDescending(i => list[i].GetBuyPrice),
+            3 => rows.OrderBy(i => list[i].GetRequiredReputationPoints),
+            _ => rows,   // Items() zaten ada göre sıralı
+        };
+        var shownRows = rows.ToList();
+        Lbl($"<color=#9aa0a6>{shownRows.Count} parça</color>");
+        foreach (var i in shownRows.Take(150))
+        {
+            var it = list[i];
+            var (cls, rarity) = itemInfo[i];
+            bool locked = it.GetRequiredReputationPoints > rep;
             H();
-            Lbl(name, 250);
-            Lbl($"<color=#9aa0a6>{cls}</color>", 150);
-            Lbl($"{it.GetBuyPrice:0} $  •  itibar {it.GetRequiredReputationPoints}", 150);
+            Lbl(locked ? $"<color=#9aa0a6>{it.GetName}</color>" : it.GetName, 230);
+            Lbl($"<color=#9aa0a6>{cls}</color>", 130);
+            Lbl($"<color={RarityColor(rarity)}>{rarity}</color>", 80);
+            Lbl($"{it.GetBuyPrice:0} $  •  itibar {it.GetRequiredReputationPoints}", 140);
             if (Btn("Ver", 50)) Game("item", $"{it.ItemArrayIndex},{itemCount}");
             EH();
         }
+        if (shownRows.Count > 150) Lbl("<color=#9aa0a6>… ilk 150 gösteriliyor, filtreyi daralt</color>");
     }
+
+    // Items() ile aynı sırada; kategori/nadirlik her karede reflection'la hesaplanmasın
+    static List<(string Cls, string Rarity)> itemInfo;
+    static string itemCat, itemRarity;
+    static bool itemUnlockedOnly;
+    static int itemSort;
+
+    static string RarityColor(string r) => r.ToLowerInvariant() switch
+    {
+        var s when s.Contains("legend") => "#ffb02e",
+        var s when s.Contains("epic") => "#c77dff",
+        var s when s.Contains("uncommon") => "#5fd068",
+        var s when s.Contains("rare") => "#4da3ff",
+        _ => "#c8ccd2",
+    };
 
     static void DrawGeneral()
     {
