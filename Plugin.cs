@@ -1746,7 +1746,7 @@ static class Core
             var (pos, rot) = AreaPose(area);
             MoveCar(car, pos, rot);
             try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { }
-            pendingDeliver.Add((car, Time.time + 1.5f));
+            pendingDeliver.Add((car, Time.time + 1.5f, 0));
             return "araç teslim alanına konuldu, birazdan teslim edilecek";
         }
         StartDeliver(csm, car, area);
@@ -1780,7 +1780,7 @@ static class Core
     }
 
     static readonly HashSet<ulong> delivered = new();
-    static readonly List<(Car Car, float T)> pendingDeliver = new();
+    static readonly List<(Car Car, float T, int Try)> pendingDeliver = new();
 
     static void StartDeliver(CarServiceManager csm, Car car, CustomerCarDeliveryArea area)
     {
@@ -1793,7 +1793,7 @@ static class Core
     {
         for (int i = pendingDeliver.Count - 1; i >= 0; i--)
         {
-            var (car, t) = pendingDeliver[i];
+            var (car, t, tries) = pendingDeliver[i];
             if (Time.time < t) continue;
             pendingDeliver.RemoveAt(i);
             if (car == null) continue;
@@ -1801,6 +1801,14 @@ static class Core
             bool inArea = false;
             try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
             var csm = UnityEngine.Object.FindObjectOfType<CarServiceManager>();
+            if ((!inArea || area == null) && csm != null && tries < 3)
+            {
+                // fizik bazen ilk taşımayı geri alıyor / alan bir önceki teslimden hâlâ dolu: yeniden dene
+                var a2 = csm.GetEmptyCustomerCarDeliveryArea();
+                if (a2 != null) { var (pos, rot) = AreaPose(a2); MoveCar(car, pos, rot); try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { } }
+                pendingDeliver.Add((car, Time.time + 1.5f, tries + 1));
+                continue;
+            }
             if (!inArea || area == null || csm == null) { Toast($"{CarLabel(car)}: teslim alanına girmedi, teslim edilmedi"); Plugin.L.LogWarning($"Teslim: {CarLabel(car)} alana girmedi"); continue; }
             if (more) { Toast("teslim alanında birden fazla araç var"); continue; }
             StartDeliver(csm, car, area);
