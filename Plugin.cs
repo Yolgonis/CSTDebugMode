@@ -87,7 +87,7 @@ static class Core
     const string MsgName = "CSTDebug";
     internal static readonly HashSet<string> Prims = new()
         { "System.Int32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Boolean", "System.String" };
-    static readonly string[] Tabs = { "Genel", "Ağ", "Oyuncu", "İnceleyici", "Konsol" };
+    static readonly string[] Tabs = { "Test", "Genel", "Ağ", "Oyuncu", "İnceleyici", "Konsol" };
     static readonly string[] Presets = { "CarServiceManager", "JobDispatchManager", "ServiceRequestSystem", "CSTNetworkManager" };
     static readonly HashSet<string> SkipMethods = new()
         { "Awake", "Start", "Update", "LateUpdate", "FixedUpdate", "OnEnable", "OnDisable", "OnDestroy", "OnNetworkSpawn", "OnNetworkDespawn", "OnGUI" };
@@ -277,6 +277,8 @@ static class Core
                 { var c = Resolve(p[1], p[2]); return c == null ? "hedef bulunamadı" : SetField(c, p[3], p[4]); }
             case "call" when p.Length >= 4:
                 { var c = Resolve(p[1], p[2]); return c == null ? "hedef bulunamadı" : Call(c, p[3]); }
+            case "game" when p.Length >= 3:
+                return GameCmd(p[1], p[2]);
         }
         return "bilinmeyen komut: " + p[0];
     }
@@ -419,7 +421,7 @@ static class Core
             Nid = no != null && no.IsSpawned ? no.NetworkObjectId.ToString() : "-",
             Label = $"{type.Name} @ {c.gameObject.name}" + (no != null ? $" [net {no.NetworkObjectId}]" : " [yerel]"),
         });
-        tab = 3;
+        tab = 4;
         snapTimer = 0f;   // değerler bir sonraki karede dolsun
     }
 
@@ -817,11 +819,12 @@ static class Core
         {
             switch (tab)
             {
-                case 0: DrawGeneral(); break;
-                case 1: DrawNet(); break;
-                case 2: DrawPlayer(); break;
-                case 3: DrawInspector(); break;
-                case 4: DrawConsole(); break;
+                case 0: DrawTest(); break;
+                case 1: DrawGeneral(); break;
+                case 2: DrawNet(); break;
+                case 3: DrawPlayer(); break;
+                case 4: DrawInspector(); break;
+                case 5: DrawConsole(); break;
             }
             contentH = cy + 8;   // bir sonraki karede kaydırma yüksekliği
         }
@@ -854,6 +857,155 @@ static class Core
         GUI.Label(new Rect(r.x + 12, r.y + 8, r.width - 20, r.height - 10), text, sHud);
     }
 
+
+    // ───────────────────────── oyun testleri ─────────────────────────
+    // Oyunun kendi server metotları; host'ta çalışır, istemci "game" komutuyla host'a yollar.
+
+    static PlayersInventory invCache;
+    static DayNightCycle clockCache;
+    static List<ScriptableCarPartItemBase> items;
+    static string moneyIn = "", repIn = "", itemQuery = "";
+    static int itemCount = 1;
+
+    static T FindFirst<T>(ref T cache) where T : UnityEngine.Object
+    {
+        if (cache != null) return cache;
+        var a = UnityEngine.Object.FindObjectsByType(Il2CppType.Of<T>(), FindObjectsSortMode.None);
+        return cache = a.Length > 0 ? a[0].TryCast<T>() : null;
+    }
+
+    static PlayersInventory Inv => FindFirst(ref invCache);
+    static DayNightCycle Clock => FindFirst(ref clockCache);
+
+    static List<ScriptableCarPartItemBase> Items()
+    {
+        if (items is { Count: > 0 }) return items;
+        items = new List<ScriptableCarPartItemBase>();
+        var all = ScriptableCarPartItemBase.All;
+        if (all != null) foreach (var v in all.Values) if (v != null) items.Add(v);
+        items.Sort((a, b) => string.Compare(a.GetName, b.GetName, StringComparison.CurrentCultureIgnoreCase));
+        return items;
+    }
+
+    // Parça sınıfı adı → envanter kategorisi (ScriptableCarPartBattery → CarPartNames.Battery); adları farklı olanlar elle.
+    static readonly Dictionary<string, string> PartAlias = new()
+        { ["CoolingWater"] = "CoolingRadiatorWater", ["BrakeFluid"] = "BrakeSystemFluid", ["WindshieldWiperFluid"] = "WindscreenWasherFluid" };
+
+    static CarPartNames? PartOf(ScriptableCarPartItemBase item)
+    {
+        var n = item.GetIl2CppType().Name.Replace("ScriptableCarPart", "");
+        if (PartAlias.TryGetValue(n, out var a)) n = a;
+        return Enum.TryParse<CarPartNames>(n, true, out var pn) ? pn : null;   // Fuse gibi birden çok kategoriye düşenler: null
+    }
+
+    static long Num(string s) => long.Parse(s.Trim().Replace(".", "").Replace(",", "").Replace(" ", ""), CultureInfo.InvariantCulture);
+
+    static string GameCmd(string op, string arg)
+    {
+        var inv = Inv;
+        switch (op)
+        {
+            case "addmoney" or "setmoney" or "addrep" or "setrep" when inv == null:
+                return "PlayersInventory yok (oyun sahnesinde olmalısın)";
+            case "addmoney": inv.AddMoney(Num(arg)); return $"Para: {inv.GetMoney:N0}";
+            case "setmoney": inv.SetMoney(Num(arg)); return $"Para: {inv.GetMoney:N0}";
+            case "addrep": inv.IncreaseReputationPoint((int)Num(arg)); return $"İtibar: {inv.GetReputationPoints}";
+            case "setrep": inv.SetReputationPoint((int)Num(arg)); return $"İtibar: {inv.GetReputationPoints}";
+            case "spawn":
+                var jd = JobDispatchManager.Instance;
+                if (jd == null) return "JobDispatchManager yok";
+                jd.SpawnVehicleRequest();
+                return "Yeni araç isteği oluşturuldu";
+            case "time":
+            {
+                var c = Clock;
+                if (c == null) return "DayNightCycle yok";
+                var t = arg.Split(',');
+                c.SetCurrentDay((int)Num(t[0]), F(t[1]));
+                return $"Gün {t[0]}, saat {t[1]}:00";
+            }
+            case "item":
+            {
+                if (inv == null) return "PlayersInventory yok";
+                var t = arg.Split(',');
+                int idx = (int)Num(t[0]), n = Math.Clamp((int)Num(t[1]), 1, 50);
+                var item = Items().FirstOrDefault(i => i.ItemArrayIndex == idx);
+                if (item == null) return "parça bulunamadı: " + idx;
+                var part = PartOf(item);
+                if (part == null) return item.GetName + ": kategori eşlenemedi";
+                for (int i = 0; i < n; i++) inv.AddItemToInventory(part.Value, item);
+                return $"{n}x {item.GetName} envantere eklendi";
+            }
+        }
+        return "bilinmeyen test komutu: " + op;
+    }
+
+    static void Game(string op, string arg)
+    {
+        if (PureClient) { Send(NetworkManager.ServerClientId, $"game\t{op}\t{Clean(arg)}"); Toast("Host'a gönderildi"); }
+        else Toast(SafeRun(() => GameCmd(op, arg)));
+    }
+
+    static void DrawTest()
+    {
+        if (PureClient) Lbl("<i><color=#9aa0a6>İstemcisin: komutlar host'ta çalışır (host'ta mod + 'istemcilere izin ver' gerekir).</color></i>");
+        var inv = Inv;
+
+        Sec("Ekonomi");
+        Lbl(inv == null ? "PlayersInventory bulunamadı — bir kayıt yükle / oturum aç."
+            : $"Para: <b>{inv.GetMoney:N0} $</b>     İtibar: <b>{inv.GetReputationPoints}</b>");
+        H();
+        foreach (var v in new[] { 1000, 10000, 100000 }) if (Btn($"+{v:N0} $")) Game("addmoney", v.ToString());
+        moneyIn = Txt(moneyIn, 110, "moneyIn");
+        if (Btn("Ayarla")) Game("setmoney", moneyIn);
+        EH();
+        H();
+        foreach (var v in new[] { 10, 100, 1000 }) if (Btn($"+{v} itibar")) Game("addrep", v.ToString());
+        repIn = Txt(repIn, 110, "repIn");
+        if (Btn("Ayarla ")) Game("setrep", repIn);
+        EH();
+
+        Sec("İş akışı");
+        H();
+        if (Btn("Yeni müşteri aracı getir")) Game("spawn", "");
+        EH();
+
+        Sec("Zaman");
+        var clock = Clock;
+        int day = clock != null ? clock.GetCurrentDay : 1;
+        Lbl(clock == null ? "DayNightCycle bulunamadı" : $"Gün <b>{day}</b>  ({(clock.IsDay ? "gündüz" : "gece")})");
+        H();
+        foreach (var h in new[] { 8, 12, 17, 21 }) if (Btn($"{h:00}:00")) Game("time", $"{day},{h}");
+        if (Btn("Sonraki gün 08:00")) Game("time", $"{day + 1},8");
+        EH();
+
+        Sec("Parça ver");
+        H();
+        Lbl("Ara:", 36);
+        itemQuery = Txt(itemQuery, 220, "itemQuery");
+        Lbl("Adet:", 42);
+        if (Btn("-", 26)) itemCount = Math.Max(1, itemCount - 1);
+        Lbl($"<b>{itemCount}</b>", 26);
+        if (Btn("+", 26)) itemCount = Math.Min(50, itemCount + 1);
+        EH();
+        var list = Items();
+        if (list.Count == 0) { Lbl("Parça kataloğu henüz yüklenmedi (oyuna girince dolar)."); return; }
+        int shown = 0;
+        foreach (var it in list)
+        {
+            var name = it.GetName ?? "?";
+            var cls = it.GetIl2CppType().Name.Replace("ScriptableCarPart", "");
+            if (itemQuery.Length > 0 && name.IndexOf(itemQuery, StringComparison.OrdinalIgnoreCase) < 0
+                && cls.IndexOf(itemQuery, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (++shown > 120) { Lbl("<color=#9aa0a6>… daha fazlası için aramayı daralt</color>"); break; }
+            H();
+            Lbl(name, 250);
+            Lbl($"<color=#9aa0a6>{cls}</color>", 150);
+            Lbl($"{it.GetBuyPrice:0} $  •  itibar {it.GetRequiredReputationPoints}", 150);
+            if (Btn("Ver", 50)) Game("item", $"{it.ItemArrayIndex},{itemCount}");
+            EH();
+        }
+    }
 
     static void DrawGeneral()
     {
