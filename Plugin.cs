@@ -995,14 +995,17 @@ static class Core
         float max = ScriptableCarPartItemBase.MaxDurability;
         int ok = 0, fail = 0;
         foreach (var (proc, ctrl) in Controllers(car).ToList())
+        {
+            var seen = new HashSet<IntPtr>();
             for (int i = 0; i < 16; i++)
             {
                 CarPart part;
                 try { part = ctrl.GetCarPartByIndex(i); } catch { break; }
-                if (part == null) break;
+                if (part == null || !seen.Add(part.Pointer)) break;   // index taşınca aynı parçayı döndürüyor; tekrar sayma
                 try { proc.ApplyDurabilityIssue(part.GetCarPartName(), max, false, i); ok++; }
                 catch (Exception e) { fail++; Plugin.L.LogWarning($"Onarım {part.GetCarPartName()}: {e.Message}"); }
             }
+        }
         return $"{ok} parça onarıldı" + (fail > 0 ? $", {fail} hata (log)" : "") + " — sıvılar ayrıca doldurulmalı olabilir";
     }
 
