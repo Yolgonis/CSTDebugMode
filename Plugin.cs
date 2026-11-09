@@ -1686,14 +1686,43 @@ static class Core
         if (!inArea || area == null)
         {
             // Alanın dışındaki araçla teslim akışı yarıda kalıyor (ücret gelir, araç gitmez) → önce alana koy, sonra teslim
+            if (pendingDeliver.Count > 0) return "önceki teslim bitmeden yenisi olmaz (alan tek)";
             area = csm.GetEmptyCustomerCarDeliveryArea();
-            if (area == null) return "boş teslim alanı yok";
-            car.SnapCarPhysicToDeliveryAreaClientRpc(area.transform.position, area.transform.rotation);
+            if (area == null) return "teslim alanı dolu";
+            var (pos, rot) = AreaPose(area);
+            MoveCar(car, pos, rot);
+            try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { }
             pendingDeliver.Add((car, Time.time + 1.5f));
             return "araç teslim alanına konuldu, birazdan teslim edilecek";
         }
         StartDeliver(csm, car, area);
         return "teslim başlatıldı";
+    }
+
+    static (Vector3, Quaternion) AreaPose(CustomerCarDeliveryArea area)
+    {
+        var rot = area.transform.rotation;
+        try { var b = area.boxCollider.bounds; return (new Vector3(b.center.x, b.min.y + 0.3f, b.center.z), rot); } catch { }
+        return (area.transform.position + Vector3.up * 0.3f, rot);
+    }
+
+    // Araç gövdesi ve fiziği (kökte veya çocuklarda) birlikte taşınır; tek başına transform yazmak fizik tarafından eziliyor.
+    static void MoveCar(Car car, Vector3 pos, Quaternion rot)
+    {
+        var root = car.transform;
+        var nt = car.GetComponent<NetworkTransform>();
+        if (nt != null && nt.CanCommitToTransform) nt.Teleport(pos, rot, root.localScale);
+        else root.SetPositionAndRotation(pos, rot);
+        foreach (var rb in car.GetComponentsInChildren<Rigidbody>(true))
+        {
+            if (rb == null) continue;
+            if (!rb.isKinematic) { rb.linearVelocity = Vector3.zero; rb.angularVelocity = Vector3.zero; }
+            if (rb.transform == root) { rb.position = pos; rb.rotation = rot; }
+        }
+        foreach (var t in car.GetComponentsInChildren<NetworkTransform>(true))
+            if (t != null && t != nt && t.transform != root && t.CanCommitToTransform && t.GetComponent<Rigidbody>() != null)
+                t.Teleport(pos, rot, t.transform.localScale);
+        Physics.SyncTransforms();
     }
 
     static readonly HashSet<ulong> delivered = new();
