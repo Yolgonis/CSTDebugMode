@@ -1059,16 +1059,19 @@ static class Core
         try { return it != null ? InventoryItemExtensions.GetHashSafe(it) : 0; } catch { return 0; }
     }
 
-    // Oyunun kendi ölçümü: istek için karşılanan/toplam (AScriptableServiceRequest.Fixed)
+    // Oyunun kendi ölçümü: isteğin kalite skoru (AScriptableServiceRequest.Validate, 0..1).
+    // (Fixed() ValueTuple döndürüyor; interop onu bozuk okuyor.)
+    static float? ReqScore(Car car, AScriptableServiceRequest r)
+    {
+        try { return r.Validate(car, car.CarServiceScenario?.customerRules); } catch { return null; }
+    }
+
     static string ReqStatus(Car car, AScriptableServiceRequest r)
     {
-        try
-        {
-            var t = r.Fixed(car);
-            var col = t.Item1 >= t.Item2 ? "#5fd068" : "#ff6060";
-            return $"<color={col}>{t.Item1}/{t.Item2}</color>";
-        }
-        catch (Exception e) { return "<color=#9aa0a6>? " + e.Message + "</color>"; }
+        var s = ReqScore(car, r);
+        if (s == null) return "<color=#9aa0a6>?</color>";
+        var col = s >= 0.999f ? "#5fd068" : s > 0f ? "#ffd060" : "#ff6060";
+        return $"<color={col}>%{s * 100:0}</color>";
     }
 
     static string ReqSummary(Car car, ScriptableCarServiceScenario scen)
@@ -1076,7 +1079,7 @@ static class Core
         if (scen.serviceRequests == null) return "istek yok";
         var parts = new List<string>();
         foreach (var r in scen.serviceRequests)
-            if (r != null) { try { var t = r.Fixed(car); parts.Add($"{r.name} {t.Item1}/{t.Item2}"); } catch { parts.Add(r.name + " ?"); } }
+            if (r != null) { var s = ReqScore(car, r); parts.Add($"{r.name} {(s == null ? "?" : $"%{s * 100:0}")}"); }
         return string.Join(", ", parts);
     }
 
