@@ -1274,7 +1274,10 @@ static class Core
                 // şarj / sıvı dolumu: mevcut parçayı koru, sadece dayanıklılığını (doluluğunu) tam yap
                 float cur = 0f;
                 try { cur = InventoryItemExtensions.GetNormalizedDurability(CurrentItem(ctrl)); } catch { }
-                if (cur >= 0.999f) { already++; continue; }
+                // sıvı haznesinde eşya okunamıyor (NaN); dolu olduğunu oyunun kendi "sıvı tamam" cevabından anla
+                bool liqDone = false;
+                if (Liquids.Contains(pn)) { try { liqDone = ServiceRequestSystem.GetLiquidRepaired(ctrl); } catch { } }
+                if (cur >= 0.999f || liqDone) { already++; continue; }
                 try
                 {
                     int n = PartCount(ctrl);
