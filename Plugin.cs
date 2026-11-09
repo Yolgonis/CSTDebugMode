@@ -1019,11 +1019,11 @@ static class Core
     // (issue.GetControllers bütün zinciri döndürüyor: tekerde göbek/balata/disk… Hepsine dokunmak "ekstra parça" bedeli yazar.)
     static bool repairExtras;   // senaryonun müşteri istemediği ek arızalarını da onar
 
-    static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
+    static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue, bool Change)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
     {
-        var res = new List<(CarPartNodeController, CarPartNames, string)>();
+        var res = new List<(CarPartNodeController, CarPartNames, string, bool)>();
         var seen = new HashSet<IntPtr>();
-        void AddIssue(ScriptableCarIssue issue)
+        void AddIssue(ScriptableCarIssue issue, bool change)
         {
             if (issue == null) return;
             CarPartNames ap;
@@ -1037,14 +1037,19 @@ static class Core
                 if (c == null || !seen.Add(c.Pointer)) continue;
                 CarPartNames pn;
                 try { pn = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
-                if (pn == ap) res.Add((c, pn, issue.name));
+                if (pn == ap) res.Add((c, pn, issue.name, change));
             }
         }
         if (scen.serviceRequests != null)
             foreach (var req in scen.serviceRequests)
-                if (req?.carIssues != null) foreach (var issue in req.carIssues) AddIssue(issue);
+                {
+                    if (req?.carIssues == null) continue;
+                    bool change = true;
+                    try { change = req.NeedChangeCarPart(); } catch { }   // şarj/dolum isteklerinde parça değiştirmek "yanlış işlem"
+                    foreach (var issue in req.carIssues) AddIssue(issue, change);
+                }
         bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
-        if ((repairExtras || called) && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue);   // ek arızalar istenmemiş iş sayılabilir
+        if ((repairExtras || called) && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, true);   // ek arızalar istenmemiş iş sayılabilir
         return res;
     }
 
@@ -1121,8 +1126,24 @@ static class Core
         Items();
         int fixedN = 0, already = 0;
         var failed = new List<string>();
-        foreach (var (ctrl, pn, issue) in IssueTargets(car, scen))
+        foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
         {
+            if (!change)
+            {
+                // şarj / sıvı dolumu: mevcut parçayı koru, sadece dayanıklılığını (doluluğunu) tam yap
+                float cur = 0f;
+                try { cur = InventoryItemExtensions.GetNormalizedDurability(CurrentItem(ctrl)); } catch { }
+                if (cur >= 0.999f) { already++; continue; }
+                try
+                {
+                    int n = PartCount(ctrl);
+                    for (int i = 0; i < n; i++) ctrl.ApplyDurabilityIssue(pn, ScriptableCarPartItemBase.MaxDurability, false, i);
+                    fixedN++;
+                    Plugin.L.LogInfo($"Onarım: {pn} dolduruldu/şarj edildi (%{cur * 100:0} → %100) [{issue}]");
+                }
+                catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
+                continue;
+            }
             var cands = Candidates(ctrl, pn);
             if (cands.Count == 0) { failed.Add($"{pn} (uygun eşya yok)"); continue; }
             var best = cands[0];
@@ -1202,11 +1223,11 @@ static class Core
             try { if (sc.rustyParts != BodyPartTypes.None) Lbl($"   <color=#ff8c1f>Pas:</color> {sc.rustyParts}"); } catch { }
             var targets = IssueTargets(car, sc);
             if (targets.Count == 0) Lbl("   <color=#9aa0a6>Parça değişimi gerektiren arıza yok</color>");
-            foreach (var (ctrl, pn, issue) in targets)
+            foreach (var (ctrl, pn, issue, change) in targets)
             {
                 H();
                 Lbl($"      {pn}", 170);
-                Lbl($"<color=#9aa0a6>{issue}</color>", 220);
+                Lbl($"<color=#9aa0a6>{issue}</color> {(change ? "[değiştir]" : "[doldur/şarj]")}", 260);
                 Lbl(ItemLabel(ctrl), 220);
                 EH();
             }
