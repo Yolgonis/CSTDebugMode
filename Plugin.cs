@@ -1001,6 +1001,11 @@ static class Core
             }
             case "fastcargo":
                 return SetFastCargo(arg == "1");
+            case "deliver":
+            {
+                var car = CarById(arg);
+                return car == null ? "araç bulunamadı" : $"{CarLabel(car)}: {Deliver(car)}";
+            }
         }
         return "bilinmeyen test komutu: " + op;
     }
@@ -1668,6 +1673,29 @@ static class Core
         return msg;
     }
 
+    // Hızlı teslim: oyunun kendi teslim akışı (CarServiceManager.StartDeliverCarCoroutine). Araç teslim alanında değilse
+    // boş bir teslim alanına konur. Ödeme/itibar oyunun hesabıyla gelir.
+    static string Deliver(Car car)
+    {
+        NotifyTypes nt = default;
+        bool ok = true;
+        try { ok = car.CanDeliver(out nt); } catch (Exception e) { return "CanDeliver hatası: " + e.Message; }
+        if (!ok && !nt.ToString().Contains("DeliveryArea")) return $"teslim edilemez: {nt}";
+        var csm = UnityEngine.Object.FindObjectOfType<CarServiceManager>();
+        if (csm == null) return "CarServiceManager yok";
+        CustomerCarDeliveryArea area = null; bool more = false;
+        bool inArea = false;
+        try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
+        if (!inArea || area == null)
+        {
+            area = csm.GetEmptyCustomerCarDeliveryArea();
+            if (area == null) return "boş teslim alanı yok";
+        }
+        csm.StartDeliverCarCoroutine(car, area);
+        Plugin.L.LogInfo($"Teslim: {CarLabel(car)} → {area.name}{(inArea ? "" : " (alana taşındı)")} ({nt})");
+        return "teslim başlatıldı";
+    }
+
     static Car CarById(string nid)
     {
         var sm = NM?.SpawnManager;
@@ -1717,6 +1745,7 @@ static class Core
             if (Btn("Git", 40)) Teleport(car.transform.position + car.transform.right * 2.5f + Vector3.up);
             if (Btn("Onar", 50)) Game("repair", id.ToString());
             if (Btn("Döküm", 60)) Game("dump", id.ToString());
+            if (Btn("Teslim", 60)) Game("deliver", id.ToString());
             EH();
             if (!open) continue;
             Lbl($"   Teslim günü: {car.GetExpectedDeliveryDay}   Teslim alanında: {Yn(() => car.GetIsInDeliveryArea())}   Müşteri arandı: {Yn(() => car.GetIsCustomerCalled)}");
