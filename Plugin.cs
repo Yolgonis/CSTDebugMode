@@ -29,9 +29,22 @@ public class Plugin : BasePlugin
     public override void Load()
     {
         L = Log;
+        var h = new HarmonyLib.Harmony("taral.cst.debugmode");
+        // Oyun, klasörde tanımadığı dosya (BepInEx) görünce kapanıyor; mod yüklüyken kapanmasın.
+        foreach (var m in HarmonyLib.AccessTools.GetDeclaredMethods(typeof(FileIntegrityChecker)).Where(m => m.Name == "Quit"))
+        {
+            h.Patch(m, prefix: new HarmonyLib.HarmonyMethod(typeof(Plugin), nameof(SkipQuit)));
+            L.LogInfo("Patch: " + m);
+        }
+        // Debug ile değiştirilmiş oturum herkese açık sıralamayı kirletmesin.
+        h.Patch(HarmonyLib.AccessTools.Method(typeof(Steamworks.SteamUserStats), "UploadLeaderboardScore"),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(Plugin), nameof(SkipUpload)));
         AddComponent<DebugBehaviour>();
         L.LogInfo("CST Debug Mode yüklendi — F8 menü, F9 HUD, F10 uçma");
     }
+
+    static bool SkipQuit() { L.LogWarning("FileIntegrityChecker.Quit engellendi (mod yüklü)"); return false; }
+    static bool SkipUpload() { L.LogWarning("Leaderboard skor gönderimi engellendi (debug mod açık)"); return false; }
 }
 
 // IL2CPP'ye enjekte edilen ince kabuk; managed tipli metotlar Core'da kalsın diye.
