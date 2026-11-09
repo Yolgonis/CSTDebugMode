@@ -20,13 +20,15 @@ DX11/DX12/Vulkan farketmez, Present/DXGI hook'u yok → **DX12'de çalışır**.
 | F10 | Uçma/noclip (WASD, Space yukarı, Ctrl aşağı, Shift hızlı) |
 
 ## Sekmeler
-- **Genel**: HUD ayarı (FPS, ms, grafik API, ping, konum; varsayılan kapalı), grafik API/GPU/VRAM, sahne, bellek, VSync, FPS limiti, zaman ölçeği (host → istemcilere yayınlanır).
-- **Ağ**: rol, tick, transport, ping, host'ta mod var mı, oyuncular (mesafe/RTT/"Git"), tüm NetworkObject'ler (filtre, İncele, Git).
-  Host'ta "İstemcilerin debug komutlarına izin ver" kutusu (varsayılan KAPALI).
-- **Oyuncu**: uçma, 3 konum slotu, nişangah altındaki nesne (yol, NetworkObject id/owner, bileşenler, buraya ışınlan).
-- **İnceleyici**: oyun bileşenlerini bul (hazır: CarServiceManager, JobDispatchManager, …; ya da tip ara),
-  int/float/bool/string/enum alanlarını ve `NetworkVariable<T>` değerlerini oku/yaz, parametresiz metotları çağır.
-- **Konsol**: Unity logları, hata filtresi, `BepInEx\cstdebug_log.txt`'e kaydet.
+- **Araçlar**: müşteri araçları üç grupta — *Görüşme* (müşteri aranmadı), *Tamir* (istekler eksik), *Bekliyor* (hepsi %100).
+  Satırda plaka, tamamlanan istek sayısı, Git ve aşamaya göre Onar / Teslim et. `+` ile ayrıntı: istekler, müşteri kuralı,
+  tek tek seçerek onarım, Döküm (log'a teşhis), Kaldır (ödemesiz sil — takılan araç için).
+- **Ekonomi**: para, itibar, yeni müşteri aracı, anında kargo, gün/saat.
+- **Parçalar**: parça ver (ara, kategori, nadirlik, itibarım yetenler, sıralama).
+- **Binalar**: bina slotları, yükselt, git.
+- **Oyuncu**: uçma, 3 konum slotu, nişangah altındaki nesne.
+- **Ayarlar**: HUD (varsayılan kapalı), grafik bilgisi, VSync, FPS limiti, zaman ölçeği.
+- **Geliştirici**: Ağ (rol, ping, oyuncular, NetworkObject'ler, "istemcilere izin ver"), İnceleyici (bileşen alanları/metotları), Konsol (Unity logları).
 
 ## Multiplayer nasıl çalışıyor
 - Mod mesajları NGO `CustomMessagingManager` named message (`CSTDebug`) üzerinden, oyunun kendi Steam bağlantısıyla gider.

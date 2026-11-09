@@ -87,7 +87,8 @@ static class Core
     const string MsgName = "CSTDebug";
     internal static readonly HashSet<string> Prims = new()
         { "System.Int32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Boolean", "System.String" };
-    static readonly string[] Tabs = { "Test", "Genel", "Ağ", "Oyuncu", "İnceleyici", "Konsol" };
+    static readonly string[] Tabs = { "Araçlar", "Ekonomi", "Parçalar", "Binalar", "Oyuncu", "Ayarlar", "Geliştirici" };
+    static int devTab;   // Geliştirici: 0 Ağ, 1 İnceleyici, 2 Konsol
     static readonly string[] Presets = { "CarServiceManager", "JobDispatchManager", "ServiceRequestSystem", "CSTNetworkManager" };
     static readonly HashSet<string> SkipMethods = new()
         { "Awake", "Start", "Update", "LateUpdate", "FixedUpdate", "OnEnable", "OnDisable", "OnDestroy", "OnNetworkSpawn", "OnNetworkDespawn", "OnGUI" };
@@ -151,7 +152,7 @@ static class Core
         if (!menu) return;
         BlockGameInput();
         targets.RemoveAll(t => t.C == null);   // OnGUI'de silmek IMGUI kontrol sayısını bozar
-        if ((snapTimer -= Time.unscaledDeltaTime) <= 0f) { snapTimer = 0.5f; Snapshot(); RefreshValues(); if (tab == 0) RefreshWorld(); }
+        if ((snapTimer -= Time.unscaledDeltaTime) <= 0f) { snapTimer = 0.5f; Snapshot(); RefreshValues(); if (tab == 0 || tab == 3) RefreshWorld(); }
         Raycast();
     }
 
@@ -459,7 +460,7 @@ static class Core
             Nid = no != null && no.IsSpawned ? no.NetworkObjectId.ToString() : "-",
             Label = $"{type.Name} @ {c.gameObject.name}" + (no != null ? $" [net {no.NetworkObjectId}]" : " [yerel]"),
         });
-        tab = 4;
+        tab = 6; devTab = 1;
         snapTimer = 0f;   // değerler bir sonraki karede dolsun
     }
 
@@ -861,12 +862,13 @@ static class Core
         {
             switch (tab)
             {
-                case 0: DrawTest(); break;
-                case 1: DrawGeneral(); break;
-                case 2: DrawNet(); break;
-                case 3: DrawPlayer(); break;
-                case 4: DrawInspector(); break;
-                case 5: DrawConsole(); break;
+                case 0: ClientNote(); DrawCars(); break;
+                case 1: ClientNote(); DrawEconomy(); break;
+                case 2: ClientNote(); DrawParts(); break;
+                case 3: ClientNote(); DrawBuildings(); break;
+                case 4: DrawPlayer(); break;
+                case 5: DrawGeneral(); break;
+                case 6: DrawDev(); break;
             }
             contentH = cy + 8;   // bir sonraki karede kaydırma yüksekliği
         }
@@ -1034,7 +1036,8 @@ static class Core
         cars.Clear();
         foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<Car>(), FindObjectsSortMode.None)) { var c = o.TryCast<Car>(); if (c != null) cars.Add(c); }
         carStage.Clear();
-        foreach (var c in cars) carStage[c.NetworkObjectId] = StageOf(c);
+        carReq.Clear();
+        foreach (var c in cars) { carStage[c.NetworkObjectId] = StageOf(c); carReq[c.NetworkObjectId] = ReqCount(c); }
         slots2.Clear();
         foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<ABuildingSlot>(), FindObjectsSortMode.None)) { var s = o.TryCast<ABuildingSlot>(); if (s != null) slots2.Add(s); }
     }
@@ -1849,6 +1852,14 @@ static class Core
     // Aşama: 0 görüşme (müşteri henüz aranmadı), 1 tamir (istekler eksik), 2 bekliyor (hepsi %100 / teslim edildi)
     static readonly Dictionary<ulong, int> carStage = new();
     static int carView;
+    static readonly Dictionary<ulong, (int Done, int Total)> carReq = new();
+    static (int, int) ReqCount(Car c)
+    {
+        int d = 0, t = 0;
+        try { foreach (var r in c.CarServiceScenario?.serviceRequests ?? new()) if (r != null) { t++; if ((ReqScore(c, r) ?? 0f) >= 0.999f) d++; } } catch { }
+        return (d, t);
+    }
+
     static int StageOf(Car c)
     {
         bool called = false; try { called = c.GetIsCustomerCalled; } catch { }
@@ -1873,26 +1884,27 @@ static class Core
         if (Pill(Next(110, LineH), $"Tamir ({Cnt(1)})", carView == 1)) carView = 1;
         if (Pill(Next(130, LineH), $"Bekliyor ({Cnt(2)})", carView == 2)) carView = 2;
         EH();
-        repairExtras = Tgl(repairExtras, "Onar: müşteri aranmamış olsa da ek arızaları onar (aranmışsa zaten dahil)");
+        Lbl("<color=#9aa0a6>" + (carView == 0 ? "Müşteri henüz aranmadı." : carView == 1 ? "Müşteri arandı, istekler tamamlanmadı." : "Bütün istekler tamam — teslim edilebilir.")
+            + "  Ayrıntı ve parça seçimi için + ya bas.</color>");
         if (cars.Count == 0) { Lbl("<color=#9aa0a6>Sahnede müşteri aracı yok.</color>"); return; }
         var me = LocalPlayer();
+        bool any = false;
         foreach (var car in cars)
         {
             if (car == null) continue;
             ulong id = car.NetworkObjectId;
             if ((carStage.TryGetValue(id, out var stg) ? stg : 1) != carView) continue;
-            string name = CarLabel(car), scen = "?";
-            try { scen = car.CarServiceScenario != null ? car.CarServiceScenario.name : "-"; } catch { }
+            any = true;
+            var (rd, rt) = carReq.TryGetValue(id, out var rq) ? rq : (0, 0);
             bool open = carOpen.Contains(id);
             H();
             if (Pill(Next(26, LineH), open ? "-" : "+", open)) { if (open) carOpen.Remove(id); else carOpen.Add(id); }
-            Lbl($"<b>{name}</b> <color=#9aa0a6>• {scen}</color>", 300);
-            Lbl(me != null ? $"{Vector3.Distance(me.transform.position, car.transform.position):0} m" : "", 50);
+            Lbl($"<b>{CarLabel(car)}</b>", 260);
+            Lbl($"<color={(rd == rt && rt > 0 ? "#5fd068" : "#ff8c1f")}>{rd}/{rt} istek</color>", 80);
+            Lbl(me != null ? $"<color=#9aa0a6>{Vector3.Distance(me.transform.position, car.transform.position):0} m</color>" : "", 50);
             if (Btn("Git", 40)) Teleport(car.transform.position + car.transform.right * 2.5f + Vector3.up);
-            if (Btn("Onar", 50)) Game("repair", id.ToString());
-            if (Btn("Döküm", 60)) Game("dump", id.ToString());
-            if (Btn("Teslim", 60)) Game("deliver", id.ToString());
-            if (Btn("Kaldır", 60)) Game("removecar", id.ToString());
+            if (carView == 2) { if (Btn("Teslim et", 80)) Game("deliver", id.ToString()); }
+            else if (Btn("Onar", 60)) Game("repair", id.ToString());
             EH();
             if (!open) continue;
             Lbl($"   Teslim günü: {car.GetExpectedDeliveryDay}   Teslim alanında: {Yn(() => car.GetIsInDeliveryArea())}   Müşteri arandı: {Yn(() => car.GetIsCustomerCalled)}");
@@ -1929,7 +1941,18 @@ static class Core
             if (Btn($"Seçilenleri onar ({sel.Count(x => x != BodyIdx) + (hasBody && sel.Contains(BodyIdx) ? 1 : 0)})", 170))
                 Game("repair", $"{id};{string.Join(",", sel)}");
             EH();
+            H();
+            cx += 14;
+            Lbl("<color=#9aa0a6>Diğer:</color>", 50);
+            if (carView != 2 && Btn("Teslim et", 80)) Game("deliver", id.ToString());
+            if (Btn("Döküm (log)", 100)) Game("dump", id.ToString());
+            if (Btn("Kaldır (ödemesiz sil)", 160)) Game("removecar", id.ToString());
+            EH();
+            Space(6);
         }
+        if (!any) Lbl("<color=#9aa0a6>Bu grupta araç yok.</color>");
+        Space(6);
+        repairExtras = Tgl(repairExtras, "Onar müşterinin istemediği ek arızaları da yapsın (kapalıyken yalnızca müşteri arandıysa)");
     }
 
     static void DrawBuildings()
@@ -1968,9 +1991,23 @@ static class Core
         return on ? "Anında kargo açık (yeni siparişler için)" : "Kargo süreleri normale döndü";
     }
 
-    static void DrawTest()
+    static void ClientNote()
     {
         if (PureClient) Lbl("<i><color=#9aa0a6>İstemcisin: komutlar host'ta çalışır (host'ta mod + 'istemcilere izin ver' gerekir).</color></i>");
+    }
+
+    static void DrawDev()
+    {
+        H();
+        foreach (var (k, label) in new[] { (0, "Ağ"), (1, "İnceleyici"), (2, "Konsol") })
+            if (Pill(Next(TextW(label) + 10, LineH), label, devTab == k)) devTab = k;
+        EH();
+        Space(4);
+        switch (devTab) { case 0: DrawNet(); break; case 1: DrawInspector(); break; default: DrawConsole(); break; }
+    }
+
+    static void DrawEconomy()
+    {
         var inv = Inv;
 
         Sec("Ekonomi");
@@ -1994,9 +2031,6 @@ static class Core
         if (Tgl(fast, "Anında kargo (market)") != fast) Game("fastcargo", fast ? "0" : "1");
         EH();
 
-        DrawCars();
-        DrawBuildings();
-
         Sec("Zaman");
         var clock = Clock;
         int day = clock != null ? clock.GetCurrentDay : 1;
@@ -2005,7 +2039,10 @@ static class Core
         foreach (var h in new[] { 8, 12, 17, 21 }) if (Btn($"{h:00}:00")) Game("time", $"{day},{h}");
         if (Btn("Sonraki gün 08:00")) Game("time", $"{day + 1},8");
         EH();
+    }
 
+    static void DrawParts()
+    {
         Sec("Parça ver");
         H();
         Lbl("Ara:", 36);
