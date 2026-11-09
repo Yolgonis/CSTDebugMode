@@ -1243,6 +1243,12 @@ static class Core
             if (w != null) { int n = w.needSpacerWidth; return i => i.TryCast<ScriptableCarPartSpacer>()?.GetSpacerWidth == n; }
             var c = req.TryCast<ScriptableServiceRequestSpacerCountX>();
             if (c != null) { int n = c.needSpacerCount; return i => i.TryCast<ScriptableCarPartSpacer>()?.GetSpacerCount == n; }
+            var sp = req.TryCast<ScriptableServiceRequestSpringTypeX>();
+            if (sp != null) { var t = sp.springType; return i => i.TryCast<ScriptableCarPartSpring>()?.springType == t; }
+            var tt = req.TryCast<ScriptableServiceRequestChangeTireType>();
+            if (tt != null) { var t = tt.needTireType; return i => i.TryCast<ScriptableCarPartTire>()?.tireType == t; }
+            var rm = req.TryCast<ScriptableServiceRequestIncreaseRarityMinX>();
+            if (rm != null) { var r = rm.needMinRarity; return i => (int)i.rarity >= (int)r; }
         }
         catch { }
         return null;
@@ -1334,7 +1340,7 @@ static class Core
 
     // Tekerlek: eşyadaki parçaları (jant, lastik) hash'ten tanı; değişimde lastiği en iyi uyumlu lastikle değiştir, jantı koru.
     // Değişim istenmiyorsa (ör. hava basıncı/onarım) sadece dayanıklılığı doldur. Hiçbir şey gerekmiyorsa null döner.
-    static string RepairWheel(CarPartNodeController ctrl, bool change)
+    static string RepairWheel(CarPartNodeController ctrl, bool change, Func<ScriptableCarPartItemBase, bool> need = null)
     {
         var old = CurrentItem(ctrl);
         if (!ValidItem(old)) return null;
@@ -1363,6 +1369,11 @@ static class Core
         var oldTire = Def(hashes[tireIdx]);
         var tires = Items().Where(i => i.GetIl2CppType().Name == "ScriptableCarPartTire" && itemHash.ContainsKey(i.Pointer)
                 && (oldTire == null || i.compatibilityId == oldTire.compatibilityId)).ToList();
+        if (need != null)
+        {
+            tires = Items().Where(i => i.GetIl2CppType().Name == "ScriptableCarPartTire" && itemHash.ContainsKey(i.Pointer) && need(i)).ToList();
+            if (tires.Count == 0) throw new Exception("isteğe uyan lastik yok");
+        }
         if (curRules != null)
         {
             bool Orig(ScriptableCarPartItemBase i) { try { return i.brandData != null && i.brandData.GetIsOriginal; } catch { return false; } }
@@ -1533,7 +1544,7 @@ static class Core
             if (pn == CarPartNames.Wheel)
             {
                 // Tekerlek noktası jant+lastiği tek eşyada tutuyor (geçmiş log: arıza noktaları Hub/Brakepad/…/Wheel, Tire yok).
-                try { var r = RepairWheel(ctrl, change); if (r == null) already++; else { fixedN++; Plugin.L.LogInfo($"Onarım: {r} [{issue}]"); } }
+                try { var r = RepairWheel(ctrl, change, ReqFilter(req)); if (r == null) already++; else { fixedN++; Plugin.L.LogInfo($"Onarım: {r} [{issue}]"); } }
                 catch (Exception e) { failed.Add($"Wheel ({e.Message})"); }
                 continue;
             }
