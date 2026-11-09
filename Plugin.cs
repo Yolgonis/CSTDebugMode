@@ -1059,6 +1059,27 @@ static class Core
         try { return it != null ? InventoryItemExtensions.GetHashSafe(it) : 0; } catch { return 0; }
     }
 
+    // Oyunun kendi ölçümü: istek için karşılanan/toplam (AScriptableServiceRequest.Fixed)
+    static string ReqStatus(Car car, AScriptableServiceRequest r)
+    {
+        try
+        {
+            var t = r.Fixed(car);
+            var col = t.Item1 >= t.Item2 ? "#5fd068" : "#ff6060";
+            return $"<color={col}>{t.Item1}/{t.Item2}</color>";
+        }
+        catch (Exception e) { return "<color=#9aa0a6>? " + e.Message + "</color>"; }
+    }
+
+    static string ReqSummary(Car car, ScriptableCarServiceScenario scen)
+    {
+        if (scen.serviceRequests == null) return "istek yok";
+        var parts = new List<string>();
+        foreach (var r in scen.serviceRequests)
+            if (r != null) { try { var t = r.Fixed(car); parts.Add($"{r.name} {t.Item1}/{t.Item2}"); } catch { parts.Add(r.name + " ?"); } }
+        return string.Join(", ", parts);
+    }
+
     static string ItemLabel(CarPartNodeController ctrl)
     {
         var it = CurrentItem(ctrl);
@@ -1134,7 +1155,7 @@ static class Core
         }
         catch (Exception e) { body += ", kaporta hatası: " + e.Message; }
 
-        var msg = $"{fixedN} nokta onarıldı, {already} zaten tamamdı{body}";
+        var msg = $"{fixedN} nokta onarıldı, {already} zaten tamamdı{body}   |   oyuna göre: {ReqSummary(car, scen)}";
         if (failed.Count > 0) { msg += $", {failed.Count} yapılamadı"; Plugin.L.LogWarning("Onarılamayan: " + string.Join(", ", failed)); }
         return msg;
     }
@@ -1174,7 +1195,7 @@ static class Core
             var sc = car.CarServiceScenario;
             if (sc == null) { Lbl("   senaryo yok"); continue; }
             if (sc.serviceRequests != null)
-                foreach (var r in sc.serviceRequests) if (r != null) Lbl($"   <color=#ff8c1f>İstek:</color> {r.name}");
+                foreach (var r in sc.serviceRequests) if (r != null) Lbl($"   <color=#ff8c1f>İstek:</color> {r.name}   {ReqStatus(car, r)}");
             try { if (sc.rustyParts != BodyPartTypes.None) Lbl($"   <color=#ff8c1f>Pas:</color> {sc.rustyParts}"); } catch { }
             var targets = IssueTargets(car, sc);
             if (targets.Count == 0) Lbl("   <color=#9aa0a6>Parça değişimi gerektiren arıza yok</color>");
