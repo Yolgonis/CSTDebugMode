@@ -1273,6 +1273,7 @@ static class Core
         {
             if (req == null) return false;
             if (req.TryCast<ScriptableServiceRequestIncreaseRimRarityMinX>() != null || req.TryCast<ScriptableServiceRequestIncreaseRimRarity>() != null) return true;
+            if (req.TryCast<ScriptableServiceRequestMinWheelInchX>() != null || req.TryCast<ScriptableServiceRequestIncreaseWheelInch>() != null) return true;
             return req.TryCast<ScriptableServiceRequestIncreaseRarityMinX>()?.typeReference?.GetIl2CppType().Name == "ScriptableCarPartRim";
         }
         catch { return false; }
@@ -1291,6 +1292,8 @@ static class Core
             if (sp != null) { var t = sp.springType; return i => i.TryCast<ScriptableCarPartSpring>()?.springType == t; }
             var tt = req.TryCast<ScriptableServiceRequestChangeTireType>();
             if (tt != null) { var t = tt.needTireType; return i => i.TryCast<ScriptableCarPartTire>()?.tireType == t; }
+            var wi = req.TryCast<ScriptableServiceRequestMinWheelInchX>();
+            if (wi != null) { float n = wi.needMinInch; return i => i.identicalValue >= n - 0.01f; }
             var rr = req.TryCast<ScriptableServiceRequestIncreaseRimRarityMinX>();
             if (rr != null) { var r = rr.needMinRarity; return i => (int)i.rarity >= (int)r; }
             var rm = req.TryCast<ScriptableServiceRequestIncreaseRarityMinX>();
@@ -1453,16 +1456,28 @@ static class Core
         if (best == null) throw new Exception($"uygun {(rim ? "jant" : "lastik")} yok");
         if (hashes[idx] == itemHash[best.Pointer] && dur >= 0.999f) return null;
 
+        var newHashes = hashes.ToList();
+        newHashes[idx] = itemHash[best.Pointer];
+        string tireNote = "";
+        if (rim && oldPart != null && Math.Abs(best.identicalValue - oldPart.identicalValue) > 0.01f)
+        {
+            // jant ölçüsü değişti → lastik de aynı ölçüde olmalı
+            int ti = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
+            var tire = Items().Where(i => i.GetIl2CppType().Name == "ScriptableCarPartTire" && itemHash.ContainsKey(i.Pointer) && Math.Abs(i.identicalValue - best.identicalValue) < 0.01f)
+                .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).FirstOrDefault();
+            if (ti >= 0 && tire != null) { newHashes[ti] = itemHash[tire.Pointer]; tireNote = $", lastik ← {tire.GetName} ({best.identicalValue:0} inç)"; }
+            else tireNote = $", UYARI: {best.identicalValue:0} inç lastik bulunamadı";
+        }
         var neu = InventoryItem.empty;
         neu.ItemType = CarPartNames.Wheel;
         try { neu.ItemOwner = OwnerName(); } catch { }
         neu.sessionBasedIndex = nextSbi++;
-        for (int i = 0; i < hashes.Count; i++)
-            InventoryItemExtensions.AddPart(ref neu, i == idx ? itemHash[best.Pointer] : hashes[i], ScriptableCarPartItemBase.MaxDurability);
+        for (int i = 0; i < newHashes.Count; i++)
+            InventoryItemExtensions.AddPart(ref neu, newHashes[i], ScriptableCarPartItemBase.MaxDurability);
         ctrl.InitializeWithData(old, true);    // last = eski tekerlek (oyunun kendi yazımı)
         ctrl.InitializeWithData(neu, false);
         try { Inv?.AddCarPartItemWithCarPartName(CarPartNames.Wheel, old, OwnerName()); } catch { }
-        return $"Wheel {what} ← {best.GetName} ({best.rarity}), {(rim ? "lastik" : "jant")} korundu";
+        return $"Wheel {what} ← {best.GetName} ({best.rarity}, {best.identicalValue:0.#}){(tireNote.Length > 0 ? tireNote : $", {(rim ? "lastik" : "jant")} korundu")}";
     }
 
     static void InstallSlot(CarPartNodeController ctrl, CarPartNames pn, ScriptableCarPartItemBase item, int worst, InventoryItem worstItem)
@@ -1665,6 +1680,8 @@ static class Core
             if (need != null)
             {
                 cands = Candidates(ctrl, pn).Where(need).ToList();
+                if (cands.Count == 0)   // istenen ölçü bu noktanın uyumluluk listesinde değilse katalogdan aynı türde ara
+                    cands = Items().Where(i => PartOf(i) == pn && itemHash.ContainsKey(i.Pointer) && need(i)).OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
                 if (cands.Count == 0) { failed.Add($"{pn} (isteğe uyan eşya yok: {req.name})"); continue; }
             }
             if (cands.Count == 0) { failed.Add($"{pn} (uygun eşya yok)"); continue; }
@@ -1909,11 +1926,11 @@ static class Core
         int Cnt(int st) => cars.Count(c => c != null && carStage.TryGetValue(c.NetworkObjectId, out var v) && v == st);
         Sec($"Araçlar ({cars.Count})");
         H();
-        if (Pill(Next(130, LineH), $"Görüşme ({Cnt(0)})", carView == 0)) carView = 0;
-        if (Pill(Next(110, LineH), $"Tamir ({Cnt(1)})", carView == 1)) carView = 1;
-        if (Pill(Next(130, LineH), $"Bekliyor ({Cnt(2)})", carView == 2)) carView = 2;
+        if (Pill(Next(150, LineH), $"Ön görüşme ({Cnt(0)})", carView == 0)) carView = 0;
+        if (Pill(Next(120, LineH), $"Tamirde ({Cnt(1)})", carView == 1)) carView = 1;
+        if (Pill(Next(160, LineH), $"Teslime hazır ({Cnt(2)})", carView == 2)) carView = 2;
         EH();
-        Lbl("<color=#9aa0a6>" + (carView == 0 ? "Müşteri henüz aranmadı." : carView == 1 ? "Müşteri arandı, istekler tamamlanmadı." : "Bütün istekler tamam — teslim edilebilir.")
+        Lbl("<color=#9aa0a6>" + (carView == 0 ? "Müşteriyle ön görüşme yapılmadı (aranmadı). Kabul edilince Tamirde'ye geçer." : carView == 1 ? "Kabul edildi, istekler tamamlanmadı." : "Bütün istekler tamam — müşteriye teslim edilebilir.")
             + "  Ayrıntı ve parça seçimi için + ya bas.</color>");
         if (cars.Count == 0) { Lbl("<color=#9aa0a6>Sahnede müşteri aracı yok.</color>"); return; }
         var me = LocalPlayer();
