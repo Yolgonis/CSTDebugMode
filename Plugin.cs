@@ -1071,7 +1071,7 @@ static class Core
                 }
         bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
         bool noExtras = RulesOf(scen).Contains(ServiceRequestCustomerRules.NoExtraFixes);   // müşteri ek tamir istemiyor → bedel yazılır
-        if ((repairExtras || called) && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, true);   // ek arızalar istenmemiş iş sayılabilir
+        if ((repairExtras || called) && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, !(issue?.name ?? "").Contains("Charge", StringComparison.OrdinalIgnoreCase));   // isteği olmayan ek arıza: "Charge…" şarj, gerisi değişim
         return res;
     }
 
