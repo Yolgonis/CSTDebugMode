@@ -1737,12 +1737,13 @@ static class Core
         bool inArea = false;
         try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
         if (delivered.Contains(car.NetworkObjectId)) return "bu araç zaten teslim edildi (takıldıysa Kaldır)";
+        if (inArea && !Spawned(area)) inArea = false;   // ağda olmayan şablon alan: oyunun teslimi orada hata verip yarım kalıyor
         if (!inArea || area == null)
         {
             // Alanın dışındaki araçla teslim akışı yarıda kalıyor (ücret gelir, araç gitmez) → önce alana koy, sonra teslim
             if (pendingDeliver.Count > 0) return "önceki teslim bitmeden yenisi olmaz (alan tek)";
-            area = csm.GetEmptyCustomerCarDeliveryArea();
-            if (area == null) return "teslim alanı dolu";
+            area = FreeArea(csm);
+            if (area == null) return "boş (aktif) teslim alanı yok";
             var (pos, rot) = AreaPose(area);
             MoveCar(car, pos, rot);
             try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { }
@@ -1751,6 +1752,25 @@ static class Core
         }
         StartDeliver(csm, car, area);
         return "teslim başlatıldı";
+    }
+
+    static bool Spawned(CustomerCarDeliveryArea a)
+    {
+        try { return a != null && a.NetworkObject != null && a.NetworkObject.IsSpawned && a.gameObject.activeInHierarchy; } catch { return false; }
+    }
+
+    // Oyunun "boş alan"ı bazen ağda olmayan şablonu döndürüyor (log: ArgumentException NetworkObjectReference) → yalnızca spawn edilmiş, boş alan
+    static CustomerCarDeliveryArea FreeArea(CarServiceManager csm)
+    {
+        try { var a = csm.GetEmptyCustomerCarDeliveryArea(); if (Spawned(a)) return a; } catch { }
+        foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<CustomerCarDeliveryArea>(), FindObjectsSortMode.None))
+        {
+            var a = o.TryCast<CustomerCarDeliveryArea>();
+            if (!Spawned(a)) continue;
+            Car c = null; try { c = a.CheckAnyCar(); } catch { }
+            if (c == null) return a;
+        }
+        return null;
     }
 
     static (Vector3, Quaternion) AreaPose(CustomerCarDeliveryArea area)
@@ -1801,10 +1821,11 @@ static class Core
             bool inArea = false;
             try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
             var csm = UnityEngine.Object.FindObjectOfType<CarServiceManager>();
+            if (inArea && !Spawned(area)) inArea = false;
             if ((!inArea || area == null) && csm != null && tries < 3)
             {
                 // fizik bazen ilk taşımayı geri alıyor / alan bir önceki teslimden hâlâ dolu: yeniden dene
-                var a2 = csm.GetEmptyCustomerCarDeliveryArea();
+                var a2 = FreeArea(csm);
                 if (a2 != null) { var (pos, rot) = AreaPose(a2); MoveCar(car, pos, rot); try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { } }
                 pendingDeliver.Add((car, Time.time + 1.5f, tries + 1));
                 continue;
