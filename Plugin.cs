@@ -1112,13 +1112,23 @@ static class Core
     }
 
     // Kontrol noktasına uyan eşyalar: en yüksek nadirlik, sonra en pahalı önce
-    static List<ScriptableCarPartItemBase> Candidates(CarPartNodeController ctrl, CarPartNames pn)
+    static List<ScriptableCarPartItemBase> Candidates(CarPartNodeController ctrl, CarPartNames pn, int oldHash = 0)
     {
         var ids = ctrl.compatibilityIds;
         bool fuse = pn is CarPartNames.FuseSmall or CarPartNames.FuseMid or CarPartNames.FuseLarge;   // katalogda tek "Fuse" sınıfı; boyu uyumluluk seçer
-        return Items().Where(i => (fuse ? i.GetIl2CppType().Name == "ScriptableCarPartFuse" : PartOf(i) == pn) && itemHash.ContainsKey(i.Pointer)
+        var list = Items().Where(i => (fuse ? i.GetIl2CppType().Name == "ScriptableCarPartFuse" : PartOf(i) == pn) && itemHash.ContainsKey(i.Pointer)
                 && (ids == null || ids.Count == 0 || ids.Contains(i.compatibilityId)))
             .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
+        // Eski parçayla aynı uyumluluk + aynı özellik (ör. 70A akü, 15A sigorta) olanlar öncelikli; sigortada röle≠sigorta
+        var oldDef = oldHash == 0 ? null : list.Concat(Items()).FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var h) && h == oldHash);
+        if (oldDef != null)
+        {
+            string spec(ScriptableCarPartItemBase i) { try { return i.GetIdentical ?? ""; } catch { return ""; } }
+            var same = list.Where(i => i.compatibilityId == oldDef.compatibilityId && spec(i) == spec(oldDef)).ToList();
+            if (same.Count == 0) same = list.Where(i => i.compatibilityId == oldDef.compatibilityId).ToList();
+            if (same.Count > 0) return same;
+        }
+        return list;
     }
 
     static bool ValidItem(InventoryItem it)
@@ -1136,28 +1146,15 @@ static class Core
         try { old = p.carPartItem.Value; } catch { }
         int hash = itemHash[item.Pointer];
         var pinv = Inv;
+        const bool fromInv = false;
 
-        // 1) Yeni eşyayı gerçek envanterden al: oyun kendi sessionBasedIndex/owner'ını versin (elle takmadaki veri akışı)
-        InventoryItem neu = null;
-        bool fromInv = false;
-        if (pinv != null && count == 1)
-        {
-            try
-            {
-                int before = NewestSbi(pinv, pn, hash, out _);
-                pinv.AddItemToInventory(pn, item);
-                if (NewestSbi(pinv, pn, hash, out var found) > before && found != null) { neu = found; fromInv = true; }
-            }
-            catch (Exception e) { Plugin.L.LogWarning("Envanterden eşya: " + e.Message); }
-        }
-        if (neu == null)   // çok parçalı nokta (buji vb.) veya envanter yoksa: sentetik eşya
-        {
-            neu = InventoryItem.empty;
-            neu.ItemType = pn;
-            try { neu.ItemOwner = OwnerName(); } catch { }
-            neu.sessionBasedIndex = nextSbi++;
-            for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref neu, hash, ScriptableCarPartItemBase.MaxDurability);
-        }
+        // 1) Yeni eşyayı kendimiz kur. (Envanter listesinden List<InventoryItem>[i] ile okumak interop'ta çöp veri
+        //    döndürüyor: Döküm'de tür NotImportant, rastgele dayanıklılık → oyun skoru her basışta zıplıyordu.)
+        var neu = InventoryItem.empty;
+        neu.ItemType = pn;
+        try { neu.ItemOwner = OwnerName(); } catch { }
+        neu.sessionBasedIndex = nextSbi++;
+        for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref neu, hash, ScriptableCarPartItemBase.MaxDurability);
 
         // 2) "son sökülen" = eski parça — oyunun kendi yazımıyla (setLastRemoved=true geçilen eşyayı last yapar)
         if (ValidItem(old)) ctrl.InitializeWithData(old, true);
@@ -1194,6 +1191,35 @@ static class Core
     }
 
     static int nextSbi = 900000 + new System.Random().Next(50000);
+
+    // Çok yuvalı noktalar (sigorta kutusu vb.): bütün noktayı başlatmak tutmazsa en düşük dayanıklı yuvayı tek değiştir.
+    static bool InstallBrokenSlot(CarPartNodeController ctrl, CarPartNames pn, ScriptableCarPartItemBase item)
+    {
+        int n = PartCount(ctrl), worst = -1;
+        float worstDur = 2f;
+        InventoryItem worstItem = null;
+        for (int i = 0; i < n; i++)
+        {
+            try
+            {
+                var it = ctrl.GetCarPartByIndex(i).carPartItem.Value;
+                if (!ValidItem(it)) continue;
+                float d = InventoryItemExtensions.GetNormalizedDurability(it);
+                if (d < worstDur) { worstDur = d; worst = i; worstItem = it; }
+            }
+            catch { }
+        }
+        if (worst < 0 || worstDur >= 0.999f) return false;
+        var neu = InventoryItem.empty;
+        neu.ItemType = pn;
+        try { neu.ItemOwner = OwnerName(); } catch { }
+        neu.sessionBasedIndex = nextSbi++;
+        InventoryItemExtensions.AddPart(ref neu, itemHash[item.Pointer], ScriptableCarPartItemBase.MaxDurability);
+        ctrl.InitializeWithDataAndIndex(worst, worstItem, true);   // last = eski bozuk (oyunun kendi yazımı)
+        ctrl.InitializeWithDataAndIndex(worst, neu, false);
+        try { Inv?.AddCarPartItemWithCarPartName(pn, worstItem, OwnerName()); } catch { }
+        return true;
+    }
 
     // Önceki sürümlerin bıraktığı bozuk izi temizler: "takılı" bayrağı ve çöp/boş "son sökülen".
     // Yalnızca oyunun kendi yazım yolları kullanılır.
@@ -1279,7 +1305,7 @@ static class Core
                 catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
                 continue;
             }
-            var cands = Candidates(ctrl, pn);
+            var cands = Candidates(ctrl, pn, CurrentHash(ctrl));   // eski parçayla aynı özellik öncelikli
             if (cands.Count == 0) { failed.Add($"{pn} (uygun eşya yok)"); continue; }
             var best = cands[0];
             if (CurrentHash(ctrl) == itemHash[best.Pointer] && Mathf.Approximately(InventoryItemExtensions.GetNormalizedDurability(CurrentItem(ctrl)), 1f))
@@ -1290,7 +1316,10 @@ static class Core
             }
             try
             {
+                int before = CurrentHash(ctrl);
                 Install(ctrl, pn, best, PartCount(ctrl));
+                if (CurrentHash(ctrl) == before && before != itemHash[best.Pointer] && InstallBrokenSlot(ctrl, pn, best))
+                    Plugin.L.LogInfo($"Onarım: {pn} bozuk yuva tek tek değiştirildi");
                 fixedN++;
                 Plugin.L.LogInfo($"Onarım: {pn} ← {best.GetName} ({best.rarity}) [{issue}]");
             }
