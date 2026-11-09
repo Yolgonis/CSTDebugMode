@@ -1234,6 +1234,22 @@ static class Core
         return res;
     }
 
+    // null = canlı liste okunamadı
+    static List<int> LiveBrokenFuses(CarPartNodeControllerFuse fc, CarPartNames pn)
+    {
+        try
+        {
+            var pr = fc?.fuseboxProcess;
+            if (pr == null) return null;
+            var nl = pn == CarPartNames.FuseSmall ? pr.BrokenSmallFuseIndexes : pn == CarPartNames.FuseMid ? pr.BrokenMidFuseIndexes : pr.BrokenLargeFuseIndexes;
+            if (nl == null) return null;
+            var res = new List<int>();
+            for (int i = 0; i < nl.Count; i++) res.Add(nl[i]);
+            return res;
+        }
+        catch { return null; }
+    }
+
     // Çok yuvalı noktalar (sigorta kutusu vb.): bütün noktayı başlatmak tutmazsa en düşük dayanıklı yuvayı tek değiştir.
     static (int Slot, InventoryItem Item, float Dur) WorstSlot(CarPartNodeController ctrl, CarPartNames? type = null)
     {
@@ -1407,10 +1423,14 @@ static class Core
                         var it = ctrl.GetCarPartByIndex(si).carPartItem.Value;
                         int hh = InventoryItemExtensions.GetHashSafe(it);
                         var def = Items().FirstOrDefault(x => itemHash.TryGetValue(x.Pointer, out var v) && v == hh);
-                        Plugin.L.LogInfo($"      yuva {si}: {it.ItemType} {(def != null ? def.GetName + " [" + def.GetIdentical + "]" : "#" + hh)} dur={InventoryItemExtensions.GetNormalizedDurability(it):0.###}");
+                        var fz = ctrl.GetCarPartByIndex(si).TryCast<CarPartFuse>();
+                        string fs = fz == null ? "" : $" #{fz.Index} need={(fz.GetNeededRepair() ? "T" : "f")} rep={(fz.GetRepaired() ? "T" : "f")}";
+                        Plugin.L.LogInfo($"      yuva {si}{fs}: {it.ItemType} {(def != null ? def.GetName + " [" + def.GetIdentical + "]" : "#" + hh)} dur={InventoryItemExtensions.GetNormalizedDurability(it):0.###}");
                     }
                     catch (Exception e) { Plugin.L.LogInfo($"      yuva {si}: ? {e.Message}"); }
                 }
+            var lf = LiveBrokenFuses(ctrl.TryCast<CarPartNodeControllerFuse>(), pn);
+            if (lf != null) Plugin.L.LogInfo($"      kutu: yanık sigortalar=[{string.Join(",", lf)}]");
             Plugin.L.LogInfo($"   {pn} [{issue}] change={change} need={B(() => ServiceRequestSystem.GetNeededRepair(ctrl))} rep={B(() => ServiceRequestSystem.GetRepaired(ctrl))} "
                 + $"liqNeed={B(() => ServiceRequestSystem.GetLiquidNeededRepair(ctrl))} liqRep={B(() => ServiceRequestSystem.GetLiquidRepaired(ctrl))} installed={inst} lastT={t}\n      cur: {cur}\n      last: {last}");
         }
@@ -1468,19 +1488,44 @@ static class Core
             if (pn is CarPartNames.FuseSmall or CarPartNames.FuseMid or CarPartNames.FuseLarge)
             {
                 // yanık sigortanın yuvası arızada yazılı (brokenIndexes); dayanıklılık %100 görünür, o yüzden tahmin edilmez
-                var slots = BrokenSlots(src);
-                if (slots.Count == 0) { failed.Add($"{pn} (arızada yanık yuva yok — Döküm'e bas)"); continue; }
-                foreach (var slot in slots)
+                // Oyunun canlı listesi: CarPartNodeProcessFuseBox.Broken{Small,Mid,Large}FuseIndexes (CarPartFuse.Index).
+                // Arıza asset'indeki brokenIndexes yalnızca başlangıç; yuva sırası ≠ sigorta numarası.
+                var fctrl = ctrl.TryCast<CarPartNodeControllerFuse>();
+                var live = LiveBrokenFuses(fctrl, pn);
+                var slots = live ?? BrokenSlots(src);
+                if (slots.Count == 0) { already++; continue; }
+                foreach (var fuseIdx in slots)
                 {
-                    InventoryItem slotItem = null, lastItem = null;
-                    try { var sp = ctrl.GetCarPartByIndex(slot); slotItem = sp.carPartItem.Value; lastItem = sp.lastRemovedCarPartItem.Value; } catch { }
-                    if (!ValidItem(slotItem)) { failed.Add($"{pn} (yuva {slot} okunamadı)"); continue; }
-                    // daha önce değiştirildiyse son sökülen farklı eşya (fabrikada ikisi de aynı sbi)
-                    if (ValidItem(lastItem) && lastItem.sessionBasedIndex != slotItem.sessionBasedIndex) { already++; continue; }
+                    CarPartFuse fp = null; int slot = -1;
+                    try { fp = fctrl?.GetFuseByIndex(fuseIdx); } catch { }
+                    for (int k = 0, n = PartCount(ctrl); k < n; k++)
+                    {
+                        try
+                        {
+                            var cp = ctrl.GetCarPartByIndex(k);
+                            if (fp != null ? cp.Pointer == fp.Pointer : cp.TryCast<CarPartFuse>()?.Index == fuseIdx) { slot = k; fp ??= cp.TryCast<CarPartFuse>(); break; }
+                        }
+                        catch { }
+                    }
+                    if (fp == null || slot < 0) { failed.Add($"{pn} (sigorta #{fuseIdx} bulunamadı)"); continue; }
+                    InventoryItem slotItem = null;
+                    try { slotItem = fp.carPartItem.Value; } catch { }
+                    if (!ValidItem(slotItem)) { failed.Add($"{pn} (sigorta #{fuseIdx} okunamadı)"); continue; }
                     int oldH = InventoryItemExtensions.GetHashSafe(slotItem);
                     var fc = Candidates(ctrl, pn, oldH);   // aynı amper öncelikli
                     if (fc.Count == 0) { failed.Add($"{pn} (uygun sigorta yok)"); continue; }
-                    try { InstallSlot(ctrl, pn, fc[0], slot, slotItem); fixedN++; Plugin.L.LogInfo($"Onarım: {pn} yuva {slot} ← {fc[0].GetName} [{fc[0].GetIdentical}] [{issue}]"); }
+                    try
+                    {
+                        InstallSlot(ctrl, pn, fc[0], slot, slotItem);
+                        // oyun normalde sigorta değişince bunu kendisi çağırır; liste hâlâ yanık diyorsa bir kez tetikle
+                        if (LiveBrokenFuses(fctrl, pn)?.Contains(fuseIdx) == true)
+                        {
+                            try { if (pn == CarPartNames.FuseSmall) fctrl.OnSmallFuseChanged(fuseIdx); else if (pn == CarPartNames.FuseMid) fctrl.OnMidFuseChanged(fuseIdx); else fctrl.OnFuseChanged(fuseIdx); } catch { }
+                        }
+                        bool still = LiveBrokenFuses(fctrl, pn)?.Contains(fuseIdx) == true;
+                        fixedN++;
+                        Plugin.L.LogInfo($"Onarım: {pn} sigorta #{fuseIdx} (yuva {slot}) ← {fc[0].GetName} [{fc[0].GetIdentical}]{(still ? " — oyun hâlâ yanık diyor!" : "")} [{issue}]");
+                    }
                     catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
                 }
                 continue;
