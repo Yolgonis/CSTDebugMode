@@ -959,8 +959,12 @@ static class Core
             }
             case "repair":
             {
-                var car = CarById(arg);
-                return car == null ? "araç bulunamadı" : RepairCar(car);
+                // arg: "id" (hepsi) veya "id;0,2,999" (seçilenler)
+                var parts = arg.Split(';');
+                var car = CarById(parts[0]);
+                HashSet<int> only = null;
+                if (parts.Length > 1) only = parts[1].Split(',', StringSplitOptions.RemoveEmptyEntries).Select(s => (int)Num(s)).ToHashSet();
+                return car == null ? "araç bulunamadı" : RepairCar(car, only);
             }
             case "dump":
             {
@@ -983,6 +987,8 @@ static class Core
     static readonly List<Car> cars = new();
     static readonly List<ABuildingSlot> slots2 = new();
     static readonly HashSet<ulong> carOpen = new();
+    // shortcut: seçim IssueTargets sırasına göre indeks; host ve istemcide "ek arızalar" seçeneği farklıysa sıra kayabilir
+    static readonly Dictionary<ulong, HashSet<int>> repairSel = new();
 
     static void RefreshWorld()
     {
@@ -1128,6 +1134,17 @@ static class Core
         for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref inv, itemHash[item.Pointer], ScriptableCarPartItemBase.MaxDurability);
         ctrl.InitializeWithData(inv, false);
 
+        // sökülen eski parça, elle değişimdeki gibi oyuncu envanterine düşsün
+        try
+        {
+            if (old != null && old.ItemType != CarPartNames.NotImportant && InventoryItemExtensions.GetHashSafe(old) != -1)
+            {
+                var pinv = Inv;
+                if (pinv != null) { pinv.AddCarPartItemWithCarPartName(pn, old, OwnerName()); Plugin.L.LogInfo($"Envantere: sökülen {pn}"); }
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning("Envantere ekleme: " + e.Message); }
+
         // Oyun değişimi "son sökülen = eski parça" ile anlıyor (Döküm: elle değişimde last=eski bozuk parça).
         // InitializeWithData(…, true) last'a YENİ parçayı yazıyordu → oyun "değişim yok" diyordu.
         try
@@ -1212,15 +1229,19 @@ static class Core
 
     // Senaryodaki arızalı parçaları uyumlu en yüksek nadirlikteki eşyayla değiştirir. Aynı eşya zaten takılıysa dokunmaz
     // (tekrar basmak güvenli). Host'ta çalışır.
-    static string RepairCar(Car car)
+    // only: IssueTargets sırasındaki seçili indeksler (null = hepsi). BodyIdx = kaporta/yıkama.
+    const int BodyIdx = 999;
+
+    static string RepairCar(Car car, HashSet<int> only = null)
     {
         var scen = car.CarServiceScenario;
         if (scen == null) return "aracın senaryosu yok";
         Items();
-        int fixedN = 0, already = 0;
+        int fixedN = 0, already = 0, idx = -1;
         var failed = new List<string>();
         foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
         {
+            if (only != null && !only.Contains(++idx)) continue;
             if (!change)
             {
                 // şarj / sıvı dolumu: mevcut parçayı koru, sadece dayanıklılığını (doluluğunu) tam yap
@@ -1257,6 +1278,7 @@ static class Core
 
         // kaporta: paslı parçaları temizle + boyalı say, yıkama istendiyse yıka
         string body = "";
+        if (only == null || only.Contains(BodyIdx))
         try
         {
             var layer = car.carBodyLayerController;
@@ -1321,15 +1343,31 @@ static class Core
                 foreach (var r in sc.serviceRequests) if (r != null) Lbl($"   <color=#ff8c1f>İstek:</color> {r.name}   {ReqStatus(car, r)}");
             try { if (sc.rustyParts != BodyPartTypes.None) Lbl($"   <color=#ff8c1f>Pas:</color> {sc.rustyParts}"); } catch { }
             var targets = IssueTargets(car, sc);
+            if (!repairSel.TryGetValue(id, out var sel))   // varsayılan: hepsi seçili
+                repairSel[id] = sel = Enumerable.Range(0, targets.Count).Append(BodyIdx).ToHashSet();
             if (targets.Count == 0) Lbl("   <color=#9aa0a6>Parça değişimi gerektiren arıza yok</color>");
-            foreach (var (ctrl, pn, issue, change) in targets)
+            for (int i = 0; i < targets.Count; i++)
             {
+                var (ctrl, pn, issue, change) = targets[i];
                 H();
-                Lbl($"      {pn}", 170);
+                cx += 14;
+                bool on = sel.Contains(i);
+                if (Tgl(on, $"{pn}") != on) { if (on) sel.Remove(i); else sel.Add(i); }
+                cx = lx + 200;
                 Lbl($"<color=#9aa0a6>{issue}</color> {(change ? "[değiştir]" : "[doldur/şarj]")}", 260);
                 Lbl(ItemLabel(ctrl), 220);
                 EH();
             }
+            bool hasBody = false;
+            try { hasBody = sc.rustyParts != BodyPartTypes.None; } catch { }
+            H();
+            cx += 14;
+            if (hasBody) { bool b = sel.Contains(BodyIdx); if (Tgl(b, "Kaporta (pas/boya/yıkama)") != b) { if (b) sel.Remove(BodyIdx); else sel.Add(BodyIdx); } }
+            if (Btn("Tümünü seç", 90)) { sel.UnionWith(Enumerable.Range(0, targets.Count)); sel.Add(BodyIdx); }
+            if (Btn("Hiçbiri", 70)) sel.Clear();
+            if (Btn($"Seçilenleri onar ({sel.Count(x => x != BodyIdx) + (hasBody && sel.Contains(BodyIdx) ? 1 : 0)})", 170))
+                Game("repair", $"{id};{string.Join(",", sel)}");
+            EH();
         }
     }
 
