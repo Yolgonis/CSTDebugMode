@@ -41,7 +41,7 @@ public class Plugin : BasePlugin
             prefix: new HarmonyLib.HarmonyMethod(typeof(Plugin), nameof(SkipUpload)));
         Core.BindConfig(Config);
         AddComponent<DebugBehaviour>();
-        L.LogInfo("CST Debug Mode yüklendi — F8 menü, F9 HUD, F10 uçma");
+        L.LogInfo("CST Debug Mode yüklendi — F8 menü, F10 uçma");
     }
 
     static bool SkipQuit() { L.LogWarning("FileIntegrityChecker.Quit engellendi (mod yüklü)"); return false; }
@@ -94,7 +94,7 @@ static class Core
     const BF Decl = BF.Instance | BF.Public | BF.NonPublic | BF.DeclaredOnly;
     const BF Any = BF.Instance | BF.Public | BF.NonPublic;
 
-    static bool inited, menu, hud = true, fly, allowClients, errorsOnly;
+    static bool inited, menu, hud, fly, allowClients, errorsOnly;
     static int tab, errorCount;
     static Vector2 scroll;
     static float smoothDt = 0.016f, flySpeed = 10f, snapTimer, toastUntil, timeScale = 1f;
@@ -144,11 +144,11 @@ static class Core
         if (kb != null)
         {
             if (kb.f8Key.wasPressedThisFrame) ToggleMenu();
-            if (kb.f9Key.wasPressedThisFrame) hud = !hud;
             if (kb.f10Key.wasPressedThisFrame) SetFly(!fly);
         }
         EnsureMessaging();
         if (!menu) return;
+        BlockGameInput();
         targets.RemoveAll(t => t.C == null);   // OnGUI'de silmek IMGUI kontrol sayısını bozar
         if ((snapTimer -= Time.unscaledDeltaTime) <= 0f) { snapTimer = 0.5f; Snapshot(); RefreshValues(); if (tab == 0) RefreshWorld(); }
         Raycast();
@@ -179,11 +179,36 @@ static class Core
         menu = !menu;
         if (menu) { prevLock = Cursor.lockState; prevVisible = Cursor.visible; }
         else { Cursor.lockState = prevLock; Cursor.visible = prevVisible; }
-        if (lockInput || inputLocked) SetPlayerInput(!menu);
+        SetPlayerInput(!menu);
+        if (!menu) RestoreGameInput();
     }
 
-    // Menü açıkken karakter yürümesin/kamera dönmesin (metin yazarken tuşlar oyuna gitmesin).
-    static bool lockInput = true, inputLocked;
+    // Menü açıkken oyunun bütün InputAction'ları kapalı: yürüme/bakış, etkileşim tuşları, arkadaki oyun butonları.
+    // F8/F10 klavye cihazından doğrudan okunduğu için etkilenmez; IMGUI olayları da action'lardan bağımsız.
+    static bool inputLocked;
+    static readonly List<UnityEngine.InputSystem.InputAction> disabledActions = new();
+
+    static void BlockGameInput()   // her karede: oyun bir action'ı yeniden açarsa tekrar kapat
+    {
+        try
+        {
+            var list = UnityEngine.InputSystem.InputSystem.ListEnabledActions();
+            for (int i = 0; i < list.Count; i++)
+            {
+                var a = list[i];
+                if (a == null) continue;
+                a.Disable();
+                if (!disabledActions.Any(x => x.Pointer == a.Pointer)) disabledActions.Add(a);
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning("Girdi kapatma: " + e.Message); }
+    }
+
+    static void RestoreGameInput()
+    {
+        foreach (var a in disabledActions) { try { if (a != null && !a.enabled) a.Enable(); } catch { } }
+        disabledActions.Clear();
+    }
 
     static void SetPlayerInput(bool active)
     {
@@ -620,9 +645,12 @@ static class Core
     static int drag;   // 0 yok, 1 taşı, 2 boyutlandır
     static Vector2 dragOff;
     static BepInEx.Configuration.ConfigEntry<string> winCfg;
+    static BepInEx.Configuration.ConfigEntry<bool> hudCfg;
 
     internal static void BindConfig(BepInEx.Configuration.ConfigFile cfg)
     {
+        hudCfg = cfg.Bind("Menu", "HUD", false, "Sağ üstte FPS/ping/konum paneli (menüden açılıp kapatılır)");
+        hud = hudCfg.Value;
         winCfg = cfg.Bind("Menu", "Window", "16,50,700,900", "Menü konumu ve boyutu: x,y,genişlik,yükseklik (1080p ölçeğinde)");
         var p = winCfg.Value.Split(',');
         if (p.Length == 4 && p.All(x => float.TryParse(x, NumberStyles.Float, CultureInfo.InvariantCulture, out _)))
@@ -964,7 +992,7 @@ static class Core
                 var car = CarById(parts[0]);
                 HashSet<int> only = null;
                 if (parts.Length > 1) only = parts[1].Split(',', StringSplitOptions.RemoveEmptyEntries).Select(s => (int)Num(s)).ToHashSet();
-                return car == null ? "araç bulunamadı" : RepairCar(car, only);
+                return car == null ? "araç bulunamadı" : $"{CarLabel(car)}: {RepairCar(car, only)}";
             }
             case "dump":
             {
@@ -1327,7 +1355,7 @@ static class Core
             catch (Exception e) { return "? " + e.Message; }
         }
         string B(Func<bool> f) { try { return f() ? "T" : "f"; } catch { return "?"; } }
-        Plugin.L.LogInfo($"── DÖKÜM #{car.NetworkObjectId} {car.GetCustomerName} • müşteri arandı={B(() => car.GetIsCustomerCalled)} • kurallar={string.Join(",", RulesOf(scen))}");
+        Plugin.L.LogInfo($"── DÖKÜM {CarLabel(car)} (#{car.NetworkObjectId}) • müşteri arandı={B(() => car.GetIsCustomerCalled)} • kurallar={string.Join(",", RulesOf(scen))}");
         if (scen.serviceRequests != null)
             foreach (var r in scen.serviceRequests)
             {
@@ -1499,6 +1527,26 @@ static class Core
 
     static string Yn(Func<bool> f) { try { return f() ? "evet" : "hayır"; } catch { return "?"; } }
 
+    // Tabletteki gibi "RADA 2107 · 907 AL 64"; bulunamazsa müşteri kodu
+    static string CarLabel(Car car)
+    {
+        string brand = "", model = "", plate = "";
+        try
+        {
+            var st = car.GetComponentInChildren<CarStats>(true);
+            if (st != null)
+            {
+                try { brand = st.CarBrandData?.BrandName ?? ""; } catch { }
+                try { model = st.CarModel?.GetLocalizedString() ?? ""; } catch { }
+                try { plate = st.GetCarPlate?.PlateText ?? ""; } catch { }
+            }
+        }
+        catch { }
+        var left = $"{brand} {model}".Trim();
+        if (left.Length == 0 && plate.Length == 0) { try { return car.GetCustomerName; } catch { return "#" + car.NetworkObjectId; } }
+        return plate.Length > 0 ? $"{left} · {plate}".Trim(' ', '·') : left;
+    }
+
     static void DrawCars()
     {
         Sec($"Araçlar ({cars.Count})");
@@ -1509,13 +1557,12 @@ static class Core
         {
             if (car == null) continue;
             ulong id = car.NetworkObjectId;
-            string name = "?", scen = "?";
-            try { name = car.GetCustomerName; } catch { }
+            string name = CarLabel(car), scen = "?";
             try { scen = car.CarServiceScenario != null ? car.CarServiceScenario.name : "-"; } catch { }
             bool open = carOpen.Contains(id);
             H();
             if (Pill(Next(26, LineH), open ? "-" : "+", open)) { if (open) carOpen.Remove(id); else carOpen.Add(id); }
-            Lbl($"<b>{name}</b> <color=#9aa0a6>#{id} • {scen}</color>", 300);
+            Lbl($"<b>{name}</b> <color=#9aa0a6>• {scen}</color>", 300);
             Lbl(me != null ? $"{Vector3.Distance(me.transform.position, car.transform.position):0} m" : "", 50);
             if (Btn("Git", 40)) Teleport(car.transform.position + car.transform.right * 2.5f + Vector3.up);
             if (Btn("Onar", 50)) Game("repair", id.ToString());
@@ -1721,8 +1768,9 @@ static class Core
     static void DrawGeneral()
     {
         Sec("Menü");
-        bool li = Tgl(lockInput, "Menü açıkken karakteri ve kamerayı kilitle (yazarken tuşlar oyuna gitmez)");
-        if (li != lockInput) { lockInput = li; SetPlayerInput(!li); }
+        bool h = Tgl(hud, "HUD göster (FPS, ms, grafik API, rol, ping, konum, hata sayısı)");
+        if (h != hud) { hud = h; if (hudCfg != null) hudCfg.Value = h; }
+        Lbl("<color=#9aa0a6>Menü açıkken oyunun bütün tuş/fare girdileri kapalıdır; kapatınca geri gelir.</color>");
         Sec("Grafik");
         Lbl($"API: <b>{SystemInfo.graphicsDeviceType}</b>   GPU: {SystemInfo.graphicsDeviceName}   VRAM: {SystemInfo.graphicsMemorySize} MB");
         Lbl($"Çözünürlük: {Screen.width}x{Screen.height}   Sahne: {SceneManager.GetActiveScene().name}");

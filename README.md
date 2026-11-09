@@ -16,12 +16,11 @@ DX11/DX12/Vulkan farketmez, Present/DXGI hook'u yok → **DX12'de çalışır**.
 ## Tuşlar
 | Tuş | İş |
 |-----|----|
-| F8  | Debug menüsü (imleç serbest kalır) |
-| F9  | HUD: FPS, ms, grafik API, rol, ping, konum, hata sayısı |
+| F8  | Debug menüsü (imleç serbest kalır, menü açıkken oyunun tüm tuş/fare girdileri kapalı) |
 | F10 | Uçma/noclip (WASD, Space yukarı, Ctrl aşağı, Shift hızlı) |
 
 ## Sekmeler
-- **Genel**: grafik API/GPU/VRAM, sahne, bellek, VSync, FPS limiti, zaman ölçeği (host → istemcilere yayınlanır).
+- **Genel**: HUD ayarı (FPS, ms, grafik API, ping, konum; varsayılan kapalı), grafik API/GPU/VRAM, sahne, bellek, VSync, FPS limiti, zaman ölçeği (host → istemcilere yayınlanır).
 - **Ağ**: rol, tick, transport, ping, host'ta mod var mı, oyuncular (mesafe/RTT/"Git"), tüm NetworkObject'ler (filtre, İncele, Git).
   Host'ta "İstemcilerin debug komutlarına izin ver" kutusu (varsayılan KAPALI).
 - **Oyuncu**: uçma, 3 konum slotu, nişangah altındaki nesne (yol, NetworkObject id/owner, bileşenler, buraya ışınlan).
