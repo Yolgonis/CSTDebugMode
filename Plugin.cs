@@ -1033,8 +1033,8 @@ static class Core
     {
         cars.Clear();
         foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<Car>(), FindObjectsSortMode.None)) { var c = o.TryCast<Car>(); if (c != null) cars.Add(c); }
-        carDone.Clear();
-        foreach (var c in cars) if (IsCarDone(c)) carDone.Add(c.NetworkObjectId);
+        carStage.Clear();
+        foreach (var c in cars) carStage[c.NetworkObjectId] = StageOf(c);
         slots2.Clear();
         foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<ABuildingSlot>(), FindObjectsSortMode.None)) { var s = o.TryCast<ABuildingSlot>(); if (s != null) slots2.Add(s); }
     }
@@ -1247,6 +1247,12 @@ static class Core
         return res;
     }
 
+    static bool IsRimReq(AScriptableServiceRequest req)
+    {
+        try { return req != null && (req.TryCast<ScriptableServiceRequestIncreaseRimRarityMinX>() != null || req.TryCast<ScriptableServiceRequestIncreaseRimRarity>() != null); }
+        catch { return false; }
+    }
+
     static Func<ScriptableCarPartItemBase, bool> ReqFilter(AScriptableServiceRequest req)
     {
         if (req == null) return null;
@@ -1260,6 +1266,8 @@ static class Core
             if (sp != null) { var t = sp.springType; return i => i.TryCast<ScriptableCarPartSpring>()?.springType == t; }
             var tt = req.TryCast<ScriptableServiceRequestChangeTireType>();
             if (tt != null) { var t = tt.needTireType; return i => i.TryCast<ScriptableCarPartTire>()?.tireType == t; }
+            var rr = req.TryCast<ScriptableServiceRequestIncreaseRimRarityMinX>();
+            if (rr != null) { var r = rr.needMinRarity; return i => (int)i.rarity >= (int)r; }
             var rm = req.TryCast<ScriptableServiceRequestIncreaseRarityMinX>();
             if (rm != null) { var r = rm.needMinRarity; return i => (int)i.rarity >= (int)r; }
         }
@@ -1353,7 +1361,8 @@ static class Core
 
     // Tekerlek: eşyadaki parçaları (jant, lastik) hash'ten tanı; değişimde lastiği en iyi uyumlu lastikle değiştir, jantı koru.
     // Değişim istenmiyorsa (ör. hava basıncı/onarım) sadece dayanıklılığı doldur. Hiçbir şey gerekmiyorsa null döner.
-    static string RepairWheel(CarPartNodeController ctrl, bool change, Func<ScriptableCarPartItemBase, bool> need = null)
+    // Tekerlek eşyası jant+lastiği birlikte tutar. rim=true: jantı değiştir (jant istekleri, "WheelIssue"), aksi hâlde lastiği.
+    static string RepairWheel(CarPartNodeController ctrl, bool change, Func<ScriptableCarPartItemBase, bool> need = null, bool rim = false)
     {
         var old = CurrentItem(ctrl);
         if (!ValidItem(old)) return null;
@@ -1370,47 +1379,57 @@ static class Core
         try { dur = InventoryItemExtensions.GetNormalizedDurability(old); } catch { }
         Items();
         ScriptableCarPartItemBase Def(int h) => items.FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var x) && x == h);
-        int tireIdx = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
+        string cls = rim ? "ScriptableCarPartRim" : "ScriptableCarPartTire", what = rim ? "jantı" : "lastiği";
+        int idx = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == cls);
 
-        if (!change || tireIdx < 0)
+        if (!change || idx < 0)
         {
             if (dur >= 0.999f) return null;
             for (int i = 0; i < hashes.Count; i++) ctrl.ApplyDurabilityIssue(CarPartNames.Wheel, ScriptableCarPartItemBase.MaxDurability, false, i);
             return $"Wheel dayanıklılığı dolduruldu (%{dur * 100:0} → %100)";
         }
 
-        var oldTire = Def(hashes[tireIdx]);
-        var tires = Items().Where(i => i.GetIl2CppType().Name == "ScriptableCarPartTire" && itemHash.ContainsKey(i.Pointer)
-                && (oldTire == null || i.compatibilityId == oldTire.compatibilityId)).ToList();
+        var oldPart = Def(hashes[idx]);
+        bool Kind(ScriptableCarPartItemBase i) => i.GetIl2CppType().Name == cls && itemHash.ContainsKey(i.Pointer);
+        var pool = Items().Where(i => Kind(i) && (oldPart == null || i.compatibilityId == oldPart.compatibilityId)).ToList();   // aynı ölçü
         if (need != null)
         {
-            tires = Items().Where(i => i.GetIl2CppType().Name == "ScriptableCarPartTire" && itemHash.ContainsKey(i.Pointer) && need(i)).ToList();
-            if (tires.Count == 0) throw new Exception("isteğe uyan lastik yok");
+            var np = pool.Where(need).ToList();
+            if (np.Count == 0) np = Items().Where(i => Kind(i) && need(i)).ToList();
+            if (np.Count == 0) throw new Exception($"isteğe uyan {(rim ? "jant" : "lastik")} yok");
+            pool = np;
+        }
+        if (rim && oldPart != null)
+        {
+            // jant tipi aynı kalsın (lastik oturması); yoksa herhangi biri
+            RimTypes Rt(ScriptableCarPartItemBase i) { try { return i.TryCast<ScriptableCarPartRim>().GetRimType; } catch { return default; } }
+            var same = pool.Where(i => Rt(i) == Rt(oldPart)).ToList();
+            if (same.Count > 0) pool = same;
         }
         if (curRules != null)
         {
             bool Orig(ScriptableCarPartItemBase i) { try { return i.brandData != null && i.brandData.GetIsOriginal; } catch { return false; } }
-            IEnumerable<ScriptableCarPartItemBase> f = tires;
+            IEnumerable<ScriptableCarPartItemBase> f = pool;
             if (curRules.Contains(ServiceRequestCustomerRules.OriginalOnly)) f = f.Where(Orig);
             if (curRules.Contains(ServiceRequestCustomerRules.AftermarketOnly)) f = f.Where(i => !Orig(i));
-            if (curRules.Contains(ServiceRequestCustomerRules.SameAsRemovedPart)) f = f.Where(i => itemHash[i.Pointer] == hashes[tireIdx]);
+            if (curRules.Contains(ServiceRequestCustomerRules.SameAsRemovedPart)) f = f.Where(i => itemHash[i.Pointer] == hashes[idx]);
             var fl = f.ToList();
-            if (fl.Count > 0) tires = fl;
+            if (fl.Count > 0) pool = fl;
         }
-        var best = tires.OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).FirstOrDefault();
-        if (best == null) throw new Exception("uygun lastik yok");
-        if (hashes[tireIdx] == itemHash[best.Pointer] && dur >= 0.999f) return null;
+        var best = pool.OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).FirstOrDefault();
+        if (best == null) throw new Exception($"uygun {(rim ? "jant" : "lastik")} yok");
+        if (hashes[idx] == itemHash[best.Pointer] && dur >= 0.999f) return null;
 
         var neu = InventoryItem.empty;
         neu.ItemType = CarPartNames.Wheel;
         try { neu.ItemOwner = OwnerName(); } catch { }
         neu.sessionBasedIndex = nextSbi++;
         for (int i = 0; i < hashes.Count; i++)
-            InventoryItemExtensions.AddPart(ref neu, i == tireIdx ? itemHash[best.Pointer] : hashes[i], ScriptableCarPartItemBase.MaxDurability);
+            InventoryItemExtensions.AddPart(ref neu, i == idx ? itemHash[best.Pointer] : hashes[i], ScriptableCarPartItemBase.MaxDurability);
         ctrl.InitializeWithData(old, true);    // last = eski tekerlek (oyunun kendi yazımı)
         ctrl.InitializeWithData(neu, false);
         try { Inv?.AddCarPartItemWithCarPartName(CarPartNames.Wheel, old, OwnerName()); } catch { }
-        return $"Wheel lastiği ← {best.GetName} ({best.rarity}), jant korundu";
+        return $"Wheel {what} ← {best.GetName} ({best.rarity}), {(rim ? "lastik" : "jant")} korundu";
     }
 
     static void InstallSlot(CarPartNodeController ctrl, CarPartNames pn, ScriptableCarPartItemBase item, int worst, InventoryItem worstItem)
@@ -1557,7 +1576,8 @@ static class Core
             if (pn == CarPartNames.Wheel)
             {
                 // Tekerlek noktası jant+lastiği tek eşyada tutuyor (geçmiş log: arıza noktaları Hub/Brakepad/…/Wheel, Tire yok).
-                try { var r = RepairWheel(ctrl, change, ReqFilter(req)); if (r == null) already++; else { fixedN++; Plugin.L.LogInfo($"Onarım: {r} [{issue}]"); } }
+                try { bool rim = IsRimReq(req) || (src != null && src.affectedPart == CarPartNames.Wheel && (src.name ?? "").Contains("WheelIssue"));
+                    var r = RepairWheel(ctrl, change, ReqFilter(req), rim); if (r == null) already++; else { fixedN++; Plugin.L.LogInfo($"Onarım: {r} [{issue}]"); } }
                 catch (Exception e) { failed.Add($"Wheel ({e.Message})"); }
                 continue;
             }
@@ -1795,8 +1815,15 @@ static class Core
     }
 
     // Tamir edildi = bütün müşteri istekleri oyuna göre %100 (ya da Teslim'e basıldı). 0.5 sn'de bir RefreshWorld'de hesaplanır.
-    static readonly HashSet<ulong> carDone = new();
-    static int carView;   // 0 = bakılacak, 1 = tamir edildi / teslim bekliyor
+    // Aşama: 0 görüşme (müşteri henüz aranmadı), 1 tamir (istekler eksik), 2 bekliyor (hepsi %100 / teslim edildi)
+    static readonly Dictionary<ulong, int> carStage = new();
+    static int carView;
+    static int StageOf(Car c)
+    {
+        bool called = false; try { called = c.GetIsCustomerCalled; } catch { }
+        if (!called && !delivered.Contains(c.NetworkObjectId)) return 0;
+        return IsCarDone(c) ? 2 : 1;
+    }
     static bool IsCarDone(Car car)
     {
         if (delivered.Contains(car.NetworkObjectId)) return true;
@@ -1808,11 +1835,12 @@ static class Core
 
     static void DrawCars()
     {
-        int nDone = cars.Count(c => c != null && carDone.Contains(c.NetworkObjectId));
+        int Cnt(int st) => cars.Count(c => c != null && carStage.TryGetValue(c.NetworkObjectId, out var v) && v == st);
         Sec($"Araçlar ({cars.Count})");
         H();
-        if (Pill(Next(170, LineH), $"Bakılacak ({cars.Count - nDone})", carView == 0)) carView = 0;
-        if (Pill(Next(230, LineH), $"Tamir edildi / teslim bekliyor ({nDone})", carView == 1)) carView = 1;
+        if (Pill(Next(130, LineH), $"Görüşme ({Cnt(0)})", carView == 0)) carView = 0;
+        if (Pill(Next(110, LineH), $"Tamir ({Cnt(1)})", carView == 1)) carView = 1;
+        if (Pill(Next(130, LineH), $"Bekliyor ({Cnt(2)})", carView == 2)) carView = 2;
         EH();
         repairExtras = Tgl(repairExtras, "Onar: müşteri aranmamış olsa da ek arızaları onar (aranmışsa zaten dahil)");
         if (cars.Count == 0) { Lbl("<color=#9aa0a6>Sahnede müşteri aracı yok.</color>"); return; }
@@ -1821,7 +1849,7 @@ static class Core
         {
             if (car == null) continue;
             ulong id = car.NetworkObjectId;
-            if (carDone.Contains(id) != (carView == 1)) continue;
+            if ((carStage.TryGetValue(id, out var stg) ? stg : 1) != carView) continue;
             string name = CarLabel(car), scen = "?";
             try { scen = car.CarServiceScenario != null ? car.CarServiceScenario.name : "-"; } catch { }
             bool open = carOpen.Contains(id);
