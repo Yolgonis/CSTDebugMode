@@ -1247,9 +1247,31 @@ static class Core
         return res;
     }
 
+    static void DumpWheel(CarPartNodeController ctrl)
+    {
+        foreach (var (lbl, it) in new[] { ("cur", CurrentItem(ctrl)), ("last", ctrl.GetPrimaryCarPart()?.lastRemovedCarPartItem.Value) })
+        {
+            if (!ValidItem(it)) continue;
+            for (int i = 0; i < 8; i++)
+            {
+                int h; try { h = InventoryItemExtensions.GetHashSafe(it, i); } catch { break; }
+                if (h == 0 || h == -1) break;
+                var d = Items().FirstOrDefault(x => itemHash.TryGetValue(x.Pointer, out var v) && v == h);
+                string extra = "";
+                try { var rm = d?.TryCast<ScriptableCarPartRim>(); if (rm != null) extra = $" rimType={rm.GetRimType}"; var tr = d?.TryCast<ScriptableCarPartTire>(); if (tr != null) extra = $" tireType={tr.tireType}"; } catch { }
+                Plugin.L.LogInfo($"      teker {lbl}[{i}]: {(d == null ? "#" + h : $"{d.GetName} ({d.GetIl2CppType().Name}) {d.rarity} compat={d.compatibilityId} [{d.GetIdentical}]{extra}")}");
+            }
+        }
+    }
+
     static bool IsRimReq(AScriptableServiceRequest req)
     {
-        try { return req != null && (req.TryCast<ScriptableServiceRequestIncreaseRimRarityMinX>() != null || req.TryCast<ScriptableServiceRequestIncreaseRimRarity>() != null); }
+        try
+        {
+            if (req == null) return false;
+            if (req.TryCast<ScriptableServiceRequestIncreaseRimRarityMinX>() != null || req.TryCast<ScriptableServiceRequestIncreaseRimRarity>() != null) return true;
+            return req.TryCast<ScriptableServiceRequestIncreaseRarityMinX>()?.typeReference?.GetIl2CppType().Name == "ScriptableCarPartRim";
+        }
         catch { return false; }
     }
 
@@ -1269,7 +1291,15 @@ static class Core
             var rr = req.TryCast<ScriptableServiceRequestIncreaseRimRarityMinX>();
             if (rr != null) { var r = rr.needMinRarity; return i => (int)i.rarity >= (int)r; }
             var rm = req.TryCast<ScriptableServiceRequestIncreaseRarityMinX>();
-            if (rm != null) { var r = rm.needMinRarity; return i => (int)i.rarity >= (int)r; }
+            if (rm != null)
+            {
+                // typeReference: istenen parça türü; checkIdenticalValue: özellik (ör. jant inç) örnekle aynı olmalı
+                var r = rm.needMinRarity; var tref = rm.typeReference; bool same = rm.checkIdenticalValue;
+                string cls = tref?.GetIl2CppType().Name, spec = null;
+                try { spec = same ? tref?.GetIdentical : null; } catch { }
+                Plugin.L.LogInfo($"   istek {req.name}: min={r} tür={cls ?? "-"} aynıÖzellik={same} [{spec}]");
+                return i => (int)i.rarity >= (int)r && (cls == null || i.GetIl2CppType().Name == cls) && (spec == null || i.GetIdentical == spec);
+            }
         }
         catch { }
         return null;
@@ -1484,7 +1514,7 @@ static class Core
             foreach (var r in scen.serviceRequests)
             {
                 if (r == null) continue;
-                Plugin.L.LogInfo($"   istek {r.name}: change={B(() => r.NeedChangeCarPart())} validate={ReqScore(car, r)}");
+                Plugin.L.LogInfo($"   istek {r.name} ({r.GetIl2CppType().Name}): change={B(() => r.NeedChangeCarPart())} validate={ReqScore(car, r)}");
                 if (r.carIssues == null) continue;
                 foreach (var iss in r.carIssues)
                 {
@@ -1524,6 +1554,7 @@ static class Core
                     }
                     catch (Exception e) { Plugin.L.LogInfo($"      yuva {si}: ? {e.Message}"); }
                 }
+            if (pn == CarPartNames.Wheel) DumpWheel(ctrl);
             var lf = LiveBrokenFuses(ctrl.TryCast<CarPartNodeControllerFuse>(), pn);
             if (lf != null) Plugin.L.LogInfo($"      kutu: yanık sigortalar=[{string.Join(",", lf)}]");
             Plugin.L.LogInfo($"   {pn} [{issue}] change={change} need={B(() => ServiceRequestSystem.GetNeededRepair(ctrl))} rep={B(() => ServiceRequestSystem.GetRepaired(ctrl))} "
