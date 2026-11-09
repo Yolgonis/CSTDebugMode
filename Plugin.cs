@@ -1412,7 +1412,9 @@ static class Core
                 bool blown = false;   // yanık sigorta: dayanıklılık %100 görünür ama oyun "onarılmadı" der
                 try { blown = ServiceRequestSystem.GetNeededRepair(ctrl) && !ServiceRequestSystem.GetRepaired(ctrl); } catch { }
                 if (slot < 0 || (slotDur >= 0.999f && !blown)) { already++; continue; }
-                // yanık ama dayanıklılık tam: hangi yuva olduğu bilinmiyor → Döküm'de yuvalara bak (şimdilik ilk uygun tür yuva)
+                // yanık ama bu türde dayanıklılığı düşük yuva yok: hangi yuva olduğu bilinmiyor. Sağlam sigortayı sökmek
+                // yanlış işlem olur → dokunma, Döküm'deki yuva listesinden doğru kural bulunacak.
+                if (slotDur >= 0.999f) { failed.Add($"{pn} (yanık yuva belirlenemedi — Döküm'e bas)"); continue; }
                 int oldH = InventoryItemExtensions.GetHashSafe(slotItem);
                 var fc = Candidates(ctrl, pn, oldH).Where(i => itemHash[i.Pointer] != oldH).ToList();   // yanık eşyanın aynısı değil
                 if (fc.Count == 0) fc = Candidates(ctrl, pn).Where(i => itemHash[i.Pointer] != oldH).ToList();
