@@ -1146,7 +1146,6 @@ static class Core
         try { old = p.carPartItem.Value; } catch { }
         int hash = itemHash[item.Pointer];
         var pinv = Inv;
-        const bool fromInv = false;
 
         // 1) Yeni eşyayı kendimiz kur. (Envanter listesinden List<InventoryItem>[i] ile okumak interop'ta çöp veri
         //    döndürüyor: Döküm'de tür NotImportant, rastgele dayanıklılık → oyun skoru her basışta zıplıyordu.)
@@ -1160,8 +1159,6 @@ static class Core
         if (ValidItem(old)) ctrl.InitializeWithData(old, true);
         // 3) yeni parçayı tak (last'a dokunma)
         ctrl.InitializeWithData(neu, false);
-        // 4) takılan eşya envanterden düşsün
-        if (fromInv) { try { pinv.DeleteCarPartItemServer(pn, neu, false); } catch (Exception e) { Plugin.L.LogWarning("Envanterden düşme: " + e.Message); } }
         // 5) sökülen eski parça envantere
         if (ValidItem(old) && pinv != null)
         {
@@ -1171,23 +1168,6 @@ static class Core
         try { if (!p.isInstalled.Value) p.isInstalled.Value = true; } catch (Exception e) { Plugin.L.LogWarning("isInstalled: " + e.Message); }
         try { p.OnInstalledServer(); } catch (Exception e) { Plugin.L.LogWarning("OnInstalledServer: " + e.Message); }
         try { ctrl.ItemInstalled(); } catch (Exception e) { Plugin.L.LogWarning("ItemInstalled: " + e.Message); }
-    }
-
-    // Envanterde bu modelin en yeni (en büyük sbi) eşyası; AddItemToInventory sonrası eklenen eşyayı bulmak için
-    static int NewestSbi(PlayersInventory pinv, CarPartNames pn, int hash, out InventoryItem newest)
-    {
-        newest = null;
-        int best = int.MinValue;
-        var map = pinv.ItemMap;
-        if (map == null || !map.ContainsKey(pn)) return best;
-        var list = map[pn];
-        for (int i = 0; i < list.Count; i++)
-        {
-            var it = list[i];
-            if (it == null || InventoryItemExtensions.GetHashSafe(it) != hash) continue;
-            if (it.sessionBasedIndex > best) { best = it.sessionBasedIndex; newest = it; }
-        }
-        return best;
     }
 
     static int nextSbi = 900000 + new System.Random().Next(50000);
