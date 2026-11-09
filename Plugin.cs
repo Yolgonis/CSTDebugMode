@@ -1028,6 +1028,15 @@ static class Core
 
     // Senaryodaki arızalar → yalnızca arızanın affectedPart türündeki kontrol noktaları.
     // (issue.GetControllers bütün zinciri döndürüyor: tekerde göbek/balata/disk… Hepsine dokunmak "ekstra parça" bedeli yazar.)
+    // Müşteri kuralları (tablette "EKSTRA TAMİRAT YOK" vb.). Onar parça seçimini ve ek arızaları bunlara göre yapar.
+    static HashSet<ServiceRequestCustomerRules> RulesOf(ScriptableCarServiceScenario scen)
+    {
+        var set = new HashSet<ServiceRequestCustomerRules>();
+        try { if (scen?.customerRules != null) foreach (var r in scen.customerRules) if (r != null) set.Add(r.rule); } catch { }
+        return set;
+    }
+    static HashSet<ServiceRequestCustomerRules> curRules;   // RepairCar süresince Candidates'in uyguladığı kurallar
+
     static bool repairExtras;   // senaryonun müşteri istemediği ek arızalarını da onar
     static readonly HashSet<CarPartNames> Liquids = new() { CarPartNames.EngineOil, CarPartNames.BrakeSystemFluid, CarPartNames.PowerSteeringFluid, CarPartNames.CoolingRadiatorWater, CarPartNames.WindscreenWasherFluid, CarPartNames.GearOil };
 
@@ -1062,7 +1071,8 @@ static class Core
                     foreach (var issue in req.carIssues) AddIssue(issue, change);
                 }
         bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
-        if ((repairExtras || called) && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, true);   // ek arızalar istenmemiş iş sayılabilir
+        bool noExtras = RulesOf(scen).Contains(ServiceRequestCustomerRules.NoExtraFixes);   // müşteri ek tamir istemiyor → bedel yazılır
+        if ((repairExtras || called) && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, true);   // ek arızalar istenmemiş iş sayılabilir
         return res;
     }
 
@@ -1120,6 +1130,17 @@ static class Core
         var list = Items().Where(i => (fuse ? i.GetIl2CppType().Name == "ScriptableCarPartFuse" : PartOf(i) == pn) && itemHash.ContainsKey(i.Pointer)
                 && (ids == null || ids.Count == 0 || ids.Contains(i.compatibilityId)))
             .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
+        if (curRules != null)
+        {
+            bool Orig(ScriptableCarPartItemBase i) { try { return i.brandData != null && i.brandData.GetIsOriginal; } catch { return false; } }
+            IEnumerable<ScriptableCarPartItemBase> f = list;
+            if (curRules.Contains(ServiceRequestCustomerRules.OriginalOnly)) f = f.Where(Orig);
+            if (curRules.Contains(ServiceRequestCustomerRules.AftermarketOnly)) f = f.Where(i => !Orig(i));
+            if (curRules.Contains(ServiceRequestCustomerRules.SameAsRemovedPart) && oldHash != 0) f = f.Where(i => itemHash[i.Pointer] == oldHash);
+            var fl = f.ToList();
+            if (fl.Count > 0) list = fl;
+            else Plugin.L.LogWarning($"{pn}: müşteri kuralına ({string.Join(",", curRules)}) uyan eşya bulunamadı, kural dışı seçildi");
+        }
         // Eski parçayla aynı uyumluluk + aynı özellik (ör. 70A akü, 15A sigorta) olanlar öncelikli; sigortada röle≠sigorta
         var oldDef = oldHash == 0 ? null : list.Concat(Items()).FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var h) && h == oldHash);
         if (oldDef != null)
@@ -1249,7 +1270,7 @@ static class Core
             catch (Exception e) { return "? " + e.Message; }
         }
         string B(Func<bool> f) { try { return f() ? "T" : "f"; } catch { return "?"; } }
-        Plugin.L.LogInfo($"── DÖKÜM #{car.NetworkObjectId} {car.GetCustomerName} • müşteri arandı={B(() => car.GetIsCustomerCalled)}");
+        Plugin.L.LogInfo($"── DÖKÜM #{car.NetworkObjectId} {car.GetCustomerName} • müşteri arandı={B(() => car.GetIsCustomerCalled)} • kurallar={string.Join(",", RulesOf(scen))}");
         if (scen.serviceRequests != null)
             foreach (var r in scen.serviceRequests) if (r != null) Plugin.L.LogInfo($"   istek {r.name}: change={B(() => r.NeedChangeCarPart())} validate={ReqScore(car, r)}");
         foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
@@ -1276,6 +1297,13 @@ static class Core
         var scen = car.CarServiceScenario;
         if (scen == null) return "aracın senaryosu yok";
         Items();
+        curRules = RulesOf(scen);
+        try { return RepairCarInner(car, scen, only); }
+        finally { curRules = null; }
+    }
+
+    static string RepairCarInner(Car car, ScriptableCarServiceScenario scen, HashSet<int> only)
+    {
         int fixedN = 0, already = 0, idx = -1;
         var failed = new List<string>();
         foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
@@ -1402,6 +1430,8 @@ static class Core
             if (sc == null) { Lbl("   senaryo yok"); continue; }
             if (sc.serviceRequests != null)
                 foreach (var r in sc.serviceRequests) if (r != null) Lbl($"   <color=#ff8c1f>İstek:</color> {r.name}   {ReqStatus(car, r)}");
+            var rl = RulesOf(sc);
+            if (rl.Count > 0) Lbl($"   <color=#ff8c1f>Müşteri kuralı:</color> {string.Join(", ", rl)}");
             try { if (sc.rustyParts != BodyPartTypes.None) Lbl($"   <color=#ff8c1f>Pas:</color> {sc.rustyParts}"); } catch { }
             var targets = IssueTargets(car, sc);
             if (!repairSel.TryGetValue(id, out var sel))   // varsayılan: hepsi seçili
