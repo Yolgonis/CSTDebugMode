@@ -1116,15 +1116,31 @@ static class Core
 
     static void Install(CarPartNodeController ctrl, CarPartNames pn, ScriptableCarPartItemBase item, int count)
     {
+        var p = ctrl.GetPrimaryCarPart();
+        InventoryItem old = null;
+        try { old = p.carPartItem.Value; } catch { }
+
         var inv = InventoryItem.empty;
         inv.ItemType = pn;
-        try { inv.ItemOwner = OwnerName(); } catch { }   // oyuncunun taktığı parça izi (orijinal parçada boş)
+        try { inv.ItemOwner = OwnerName(); } catch { }
+        inv.sessionBasedIndex = nextSbi++;   // gerçek eşyaların hepsinde benzersiz; 0 = "geçersiz" sayılabiliyor
         for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref inv, itemHash[item.Pointer], ScriptableCarPartItemBase.MaxDurability);
-        ctrl.InitializeWithData(inv, true);   // true: eskisi "son sökülen" olur, gerçek değişim gibi
-        // normal takmada tetiklenen "takıldı" olayları; servis takibi bunları dinliyor olabilir
-        try { ctrl.GetPrimaryCarPart()?.OnInstalledServer(); } catch (Exception e) { Plugin.L.LogWarning("OnInstalledServer: " + e.Message); }
+        ctrl.InitializeWithData(inv, false);
+
+        // Oyun değişimi "son sökülen = eski parça" ile anlıyor (Döküm: elle değişimde last=eski bozuk parça).
+        // InitializeWithData(…, true) last'a YENİ parçayı yazıyordu → oyun "değişim yok" diyordu.
+        try
+        {
+            if (old != null && old.ItemType != CarPartNames.NotImportant && InventoryItemExtensions.GetHashSafe(old) != -1)
+                p.lastRemovedCarPartItem.Value = old;
+        }
+        catch (Exception e) { Plugin.L.LogWarning("lastRemoved: " + e.Message); }
+        try { if (!p.isInstalled.Value) p.isInstalled.Value = true; } catch (Exception e) { Plugin.L.LogWarning("isInstalled: " + e.Message); }
+        try { p.OnInstalledServer(); } catch (Exception e) { Plugin.L.LogWarning("OnInstalledServer: " + e.Message); }
         try { ctrl.ItemInstalled(); } catch (Exception e) { Plugin.L.LogWarning("ItemInstalled: " + e.Message); }
     }
+
+    static int nextSbi = 900000 + UnityEngine.Random.Range(0, 50000);
 
     static string OwnerName()
     {
