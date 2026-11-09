@@ -1011,42 +1011,60 @@ static class Core
         return Math.Max(1, seen.Count);
     }
 
-    // Müşteri istekleri: kontrol noktası → onu hedefleyen istekler (oyunun kendi arıza→kontrol eşlemesiyle)
-    static Dictionary<IntPtr, List<AScriptableServiceRequest>> RequestMap(Car car, ScriptableCarServiceScenario scen, Dictionary<IntPtr, CarPartNodeController> targets)
+    // Parça değişimiyle çözülmeyenler (kaporta/yıkama ayrı ele alınır; pas çözücü sarf malzemesi)
+    static readonly HashSet<CarPartNames> NotSwappable = new()
+        { CarPartNames.NotImportant, CarPartNames.BodyWork, CarPartNames.CarWash, CarPartNames.BoltLoosener, CarPartNames.Wheel, CarPartNames.Engine };
+
+    // Senaryodaki arızalar → yalnızca arızanın affectedPart türündeki kontrol noktaları.
+    // (issue.GetControllers bütün zinciri döndürüyor: tekerde göbek/balata/disk… Hepsine dokunmak "ekstra parça" bedeli yazar.)
+    static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
     {
-        var map = new Dictionary<IntPtr, List<AScriptableServiceRequest>>();
-        void AddIssue(ScriptableCarIssue issue, AScriptableServiceRequest req)
+        var res = new List<(CarPartNodeController, CarPartNames, string)>();
+        var seen = new HashSet<IntPtr>();
+        void AddIssue(ScriptableCarIssue issue)
         {
             if (issue == null) return;
+            CarPartNames ap;
+            try { ap = issue.affectedPart; } catch { return; }
+            if (NotSwappable.Contains(ap)) return;
             Il2CppSystem.Collections.Generic.List<CarPartNodeController> cs = null;
             try { cs = issue.GetControllers(car); } catch { }
             if (cs == null) return;
             foreach (var c in cs)
             {
-                if (c == null) continue;
-                targets[c.Pointer] = c;
-                if (req == null) continue;
-                if (!map.TryGetValue(c.Pointer, out var l)) map[c.Pointer] = l = new();
-                if (!l.Contains(req)) l.Add(req);
+                if (c == null || !seen.Add(c.Pointer)) continue;
+                CarPartNames pn;
+                try { pn = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
+                if (pn == ap) res.Add((c, pn, issue.name));
             }
         }
         if (scen.serviceRequests != null)
             foreach (var req in scen.serviceRequests)
-                if (req?.carIssues != null) foreach (var issue in req.carIssues) AddIssue(issue, req);
-        if (scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, null);
-        return map;
+                if (req?.carIssues != null) foreach (var issue in req.carIssues) AddIssue(issue);
+        if (scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue);
+        return res;
     }
 
-    static bool Safe(Func<bool> f) { try { return f(); } catch { return false; } }
-
-    // Oyunun kendi doğrulayıcılarına göre bu kontrol noktasında iş kaldı mı?
-    static bool CtrlDone(Car car, CarPartNodeController c, List<AScriptableServiceRequest> reqs)
+    static InventoryItem CurrentItem(CarPartNodeController ctrl)
     {
-        if (reqs != null) foreach (var r in reqs) if (!Safe(() => r.IsControllerFixed(car, c))) return false;
-        if (Safe(() => ServiceRequestSystem.GetNeededRepair(c)) && !Safe(() => ServiceRequestSystem.GetRepaired(c))) return false;
-        if (Safe(() => ServiceRequestSystem.GetLiquidNeededRepair(c)) && !Safe(() => ServiceRequestSystem.GetLiquidRepaired(c))) return false;
-        if (Safe(() => ServiceRequestSystem.GetSecondaryNeedRepair(c)) && !Safe(() => ServiceRequestSystem.GetSecondaryRepaired(c))) return false;
-        return true;
+        try { return ctrl.GetPrimaryCarPart().carPartItem.Value; } catch { return null; }
+    }
+
+    static int CurrentHash(CarPartNodeController ctrl)
+    {
+        var it = CurrentItem(ctrl);
+        try { return it != null ? InventoryItemExtensions.GetHashSafe(it) : 0; } catch { return 0; }
+    }
+
+    static string ItemLabel(CarPartNodeController ctrl)
+    {
+        var it = CurrentItem(ctrl);
+        if (it == null) return "boş";
+        int h; float d;
+        try { h = InventoryItemExtensions.GetHashSafe(it); d = InventoryItemExtensions.GetNormalizedDurability(it); } catch { return "?"; }
+        Items();
+        var item = items.FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var x) && x == h);
+        return $"{(item != null ? item.GetName : (h == 0 ? "boş" : "#" + h))}  %{d * 100:0}";
     }
 
     // Kontrol noktasına uyan eşyalar: en yüksek nadirlik, sonra en pahalı önce
@@ -1066,40 +1084,28 @@ static class Core
         ctrl.InitializeWithData(inv, true);   // true: eskisi "son sökülen" olur, gerçek değişim gibi
     }
 
-    // Müşterinin istediklerini oyunun doğrulayıcısı "tamam" diyene kadar en iyi eşyadan başlayarak yapar. Host'ta çalışır.
+    // Senaryodaki arızalı parçaları uyumlu en yüksek nadirlikteki eşyayla değiştirir. Aynı eşya zaten takılıysa dokunmaz
+    // (tekrar basmak güvenli). Host'ta çalışır.
     static string RepairCar(Car car)
     {
         var scen = car.CarServiceScenario;
         if (scen == null) return "aracın senaryosu yok";
-        var targets = new Dictionary<IntPtr, CarPartNodeController>();
-        var reqMap = RequestMap(car, scen, targets);
-        foreach (var (_, c) in Controllers(car))   // senaryoda yazmasa da oyunun "onarım gerekli" dediği noktalar
-            if (!CtrlDone(car, c, null)) targets[c.Pointer] = c;
-
+        Items();
         int fixedN = 0, already = 0;
         var failed = new List<string>();
-        foreach (var ctrl in targets.Values)
+        foreach (var (ctrl, pn, issue) in IssueTargets(car, scen))
         {
-            reqMap.TryGetValue(ctrl.Pointer, out var reqs);
-            if (CtrlDone(car, ctrl, reqs)) { already++; continue; }
-            CarPartNames pn;
-            try { pn = ctrl.GetPrimaryCarPart().GetCarPartName(); } catch { failed.Add(ctrl.name); continue; }
             var cands = Candidates(ctrl, pn);
             if (cands.Count == 0) { failed.Add($"{pn} (uygun eşya yok)"); continue; }
-            int n = PartCount(ctrl);
-            bool done = false;
-            foreach (var cand in cands.Take(15))
+            var best = cands[0];
+            if (CurrentHash(ctrl) == itemHash[best.Pointer] && Mathf.Approximately(InventoryItemExtensions.GetNormalizedDurability(CurrentItem(ctrl)), 1f)) { already++; continue; }
+            try
             {
-                try { Install(ctrl, pn, cand, n); }
-                catch (Exception e) { Plugin.L.LogWarning($"Takma {pn} ← {cand.GetName}: {e.Message}"); continue; }
-                if (CtrlDone(car, ctrl, reqs)) { done = true; Plugin.L.LogInfo($"Onarım: {pn} ← {cand.GetName} ({cand.rarity})"); break; }
+                Install(ctrl, pn, best, PartCount(ctrl));
+                fixedN++;
+                Plugin.L.LogInfo($"Onarım: {pn} ← {best.GetName} ({best.rarity}) [{issue}]");
             }
-            if (done) fixedN++;
-            else
-            {
-                Install(ctrl, pn, cands[0], n);   // hiçbiri doğrulanamadıysa en iyisi takılı kalsın
-                failed.Add($"{pn} (doğrulanamadı)");
-            }
+            catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
         }
 
         // kaporta: paslı parçaları temizle + boyalı say, yıkama istendiyse yıka
@@ -1160,20 +1166,19 @@ static class Core
             EH();
             if (!open) continue;
             Lbl($"   Teslim günü: {car.GetExpectedDeliveryDay}   Teslim alanında: {Yn(() => car.GetIsInDeliveryArea())}   Müşteri arandı: {Yn(() => car.GetIsCustomerCalled)}");
-            foreach (var (proc, ctrl) in Controllers(car))
+            var sc = car.CarServiceScenario;
+            if (sc == null) { Lbl("   senaryo yok"); continue; }
+            if (sc.serviceRequests != null)
+                foreach (var r in sc.serviceRequests) if (r != null) Lbl($"   <color=#ff8c1f>İstek:</color> {r.name}");
+            try { if (sc.rustyParts != BodyPartTypes.None) Lbl($"   <color=#ff8c1f>Pas:</color> {sc.rustyParts}"); } catch { }
+            var targets = IssueTargets(car, sc);
+            if (targets.Count == 0) Lbl("   <color=#9aa0a6>Parça değişimi gerektiren arıza yok</color>");
+            foreach (var (ctrl, pn, issue) in targets)
             {
-                string part = "?", state;
-                try { var p = ctrl.GetPrimaryCarPart(); part = p != null ? p.GetCarPartName().ToString() : ctrl.name; } catch { }
-                try
-                {
-                    bool need = ServiceRequestSystem.GetNeededRepair(ctrl), done = ServiceRequestSystem.GetRepaired(ctrl);
-                    state = done ? "<color=#5fd068>onarıldı</color>" : need ? "<color=#ff6060>arızalı</color>" : "<color=#9aa0a6>sorun yok</color>";
-                }
-                catch { state = "?"; }
                 H();
-                Lbl($"      {part}", 260);
-                Lbl($"<color=#9aa0a6>{proc.GetIl2CppType().Name.Replace("CarPartNodeProcess", "")}</color>", 140);
-                Lbl(state, 120);
+                Lbl($"      {pn}", 170);
+                Lbl($"<color=#9aa0a6>{issue}</color>", 220);
+                Lbl(ItemLabel(ctrl), 220);
                 EH();
             }
         }
