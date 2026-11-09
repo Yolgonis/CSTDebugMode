@@ -1023,6 +1023,7 @@ static class Core
     // Senaryodaki arızalar → yalnızca arızanın affectedPart türündeki kontrol noktaları.
     // (issue.GetControllers bütün zinciri döndürüyor: tekerde göbek/balata/disk… Hepsine dokunmak "ekstra parça" bedeli yazar.)
     static bool repairExtras;   // senaryonun müşteri istemediği ek arızalarını da onar
+    static readonly HashSet<CarPartNames> Liquids = new() { CarPartNames.EngineOil, CarPartNames.BrakeSystemFluid, CarPartNames.PowerSteeringFluid, CarPartNames.CoolingRadiatorWater, CarPartNames.WindscreenWasherFluid, CarPartNames.GearOil };
 
     static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue, bool Change)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
     {
@@ -1042,7 +1043,7 @@ static class Core
                 if (c == null || !seen.Add(c.Pointer)) continue;
                 CarPartNames pn;
                 try { pn = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
-                if (pn == ap) res.Add((c, pn, issue.name, change));
+                if (pn == ap) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn)));   // sıvı her zaman doldurulur, değiştirilmez
             }
         }
         if (scen.serviceRequests != null)
