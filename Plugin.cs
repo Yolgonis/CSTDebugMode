@@ -1160,10 +1160,14 @@ static class Core
                     && InventoryItemExtensions.GetNormalizedDurability(last) >= 0.999f);
             if (lastIsCur)
             {
-                var broken = p.carPartItem.Value;   // .Value her seferinde ayrı kopya döndürür
-                InventoryItemExtensions.SetDurability(ref broken, ScriptableCarPartItemBase.MaxDurability * 0.1f);
+                // .Value kopyasında ref/ItemOwner="" yazmak belleği bozdu (Döküm'de çöp owner/sbi).
+                // Install ile aynı, kanıtlanmış yoldan sıfırdan kur: empty + ItemType + AddPart + sbi.
+                int h = InventoryItemExtensions.GetHashSafe(cur);
+                var broken = InventoryItem.empty;
+                broken.ItemType = cur.ItemType;
                 broken.sessionBasedIndex = nextSbi++;
-                try { broken.ItemOwner = ""; } catch { }
+                int n = PartCount(ctrl);
+                for (int i = 0; i < n; i++) InventoryItemExtensions.AddPart(ref broken, h, ScriptableCarPartItemBase.MaxDurability * 0.1f);
                 p.lastRemovedCarPartItem.Value = broken;
                 changed = true;
             }
