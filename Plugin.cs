@@ -691,13 +691,28 @@ static class Core
         Fill(new Rect(r.x, r.yMax, r.width, 1), new Color(CAccent.r, CAccent.g, CAccent.b, 0.35f));
     }
 
-    static string Txt(string s, float w)
+    // GUI.TextField kullanılamıyor (DoTextField/TextEditor stripped); tıkla-odaklan + Event KeyDown ile basit giriş.
+    static string focusKey;
+
+    static string Txt(string s, float w, string key)
     {
+        s ??= "";
         var r = Next(w, LineH);
+        var e = Event.current;
+        if (e.type == EventType.MouseDown && Vis(r) && Hover(r)) { focusKey = key; e.Use(); }
+        bool focused = focusKey == key;
+        if (focused && e.type == EventType.KeyDown)
+        {
+            if (e.keyCode == KeyCode.Backspace) { if (s.Length > 0) s = s[..^1]; e.Use(); }
+            else if (e.keyCode is KeyCode.Return or KeyCode.KeypadEnter or KeyCode.Escape or KeyCode.Tab) { focusKey = null; e.Use(); }
+            else if (e.character >= ' ' && e.character != '\t') { s += e.character; e.Use(); }
+        }
         if (!Vis(r)) return s;
         Fill(r, CField, 5f);
-        Fill(new Rect(r.x, r.yMax - 2, r.width, 2), Hover(r) ? CAccent : CCtl, new Vector4(0, 0, 5, 5));
-        return GUI.TextField(new Rect(r.x + 6, r.y, r.width - 12, r.height), s ?? "", sField);
+        Fill(new Rect(r.x, r.yMax - 2, r.width, 2), focused ? CAccent : Hover(r) ? CCtlHover : CCtl, new Vector4(0, 0, 5, 5));
+        bool caret = focused && (int)(Time.unscaledTime * 2) % 2 == 0;
+        GUI.Label(new Rect(r.x + 6, r.y, r.width - 12, r.height), s.Replace("<", "‹") + (caret ? "|" : ""), sField);
+        return s;
     }
 
     static bool Tgl(bool v, string s)
@@ -757,6 +772,7 @@ static class Core
         float sw = Screen.width / s, sh = 1080f;
         EnsureTheme();
         visTop = float.MinValue; visBot = float.MaxValue;
+        if (Event.current.type == EventType.MouseDown) focusKey = null;   // boş yere tıklamak odağı bırakır; alan tekrar alır
 
         if (Time.unscaledTime < toastUntil)
         {
@@ -797,16 +813,19 @@ static class Core
         scroll = GUI.BeginScrollView(view, scroll, new Rect(0, 0, view.width - 20, Mathf.Max(contentH, view.height)));
         lx = 0; lw = view.width - 22; cy = 0;
         visTop = scroll.y - 60; visBot = scroll.y + view.height + 60;
-        switch (tab)
+        try
         {
-            case 0: DrawGeneral(); break;
-            case 1: DrawNet(); break;
-            case 2: DrawPlayer(); break;
-            case 3: DrawInspector(); break;
-            case 4: DrawConsole(); break;
+            switch (tab)
+            {
+                case 0: DrawGeneral(); break;
+                case 1: DrawNet(); break;
+                case 2: DrawPlayer(); break;
+                case 3: DrawInspector(); break;
+                case 4: DrawConsole(); break;
+            }
+            contentH = cy + 8;   // bir sonraki karede kaydırma yüksekliği
         }
-        contentH = cy + 8;   // bir sonraki karede kaydırma yüksekliği
-        GUI.EndScrollView();
+        finally { GUI.EndScrollView(); }   // sekme hata verse de GUIClip dengesi bozulmasın (yoksa her karede Unity hatası)
 
         // boyutlandırma tutamacı
         var gc = drag == 2 || Hover(gripR) ? CAccent : CMuted;
@@ -890,7 +909,7 @@ static class Core
         }
 
         Space(6);
-        Sec("Ağ nesneleri"); H(); Lbl("Filtre:", 60); objFilter = Txt(objFilter, 200); EH();
+        Sec("Ağ nesneleri"); H(); Lbl("Filtre:", 60); objFilter = Txt(objFilter, 200, "objFilter"); EH();
         int shown = 0;
         foreach (var n in snap)
         {
@@ -965,7 +984,7 @@ static class Core
                 if (t == null) Toast(n + " tipi yok"); else FindInstances(t);
             }
         EH();
-        H(); Lbl("Tip ara:", 70); typeQuery = Txt(typeQuery, 260); if (Btn("Ara", 60)) SearchTypes(); if (Btn("Temizle", 70)) { targets.Clear(); typeResults.Clear(); } EH();
+        H(); Lbl("Tip ara:", 70); typeQuery = Txt(typeQuery, 260, "typeQuery"); if (Btn("Ara", 60)) SearchTypes(); if (Btn("Temizle", 70)) { targets.Clear(); typeResults.Clear(); } EH();
         foreach (var t in typeResults) { if (Btn(t.FullName)) FindInstances(t); }
 
         if (PureClient) Lbl("<i>İstemcisin: ağ nesnelerindeki değişiklikler host'a gönderilir (host'ta mod + izin gerekir). NetworkVariable alanları herkese senkronlanır.</i>");
@@ -990,7 +1009,7 @@ static class Core
                 {
                     var k = t.Key + e.Name;
                     edits.TryGetValue(k, out var cur);
-                    edits[k] = Txt(cur, 110);
+                    edits[k] = Txt(cur, 110, k);
                     if (Btn("Ayarla", 60)) SetFieldUI(t, e.Name, edits[k]);
                 }
                 EH();
