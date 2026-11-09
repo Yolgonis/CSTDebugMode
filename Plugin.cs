@@ -140,6 +140,7 @@ static class Core
     {
         if (!inited) Init();
         smoothDt = Mathf.Lerp(smoothDt, Time.unscaledDeltaTime, 0.05f);
+        if (pendingDeliver.Count > 0) PumpDeliveries();
         var kb = Keyboard.current;
         if (kb != null)
         {
@@ -1006,6 +1007,11 @@ static class Core
                 var car = CarById(arg);
                 return car == null ? "araç bulunamadı" : $"{CarLabel(car)}: {Deliver(car)}";
             }
+            case "removecar":
+            {
+                var car = CarById(arg);
+                return car == null ? "araç bulunamadı" : RemoveCar(car);
+            }
         }
         return "bilinmeyen test komutu: " + op;
     }
@@ -1027,6 +1033,8 @@ static class Core
     {
         cars.Clear();
         foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<Car>(), FindObjectsSortMode.None)) { var c = o.TryCast<Car>(); if (c != null) cars.Add(c); }
+        carDone.Clear();
+        foreach (var c in cars) if (IsCarDone(c)) carDone.Add(c.NetworkObjectId);
         slots2.Clear();
         foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<ABuildingSlot>(), FindObjectsSortMode.None)) { var s = o.TryCast<ABuildingSlot>(); if (s != null) slots2.Add(s); }
     }
@@ -1686,14 +1694,58 @@ static class Core
         CustomerCarDeliveryArea area = null; bool more = false;
         bool inArea = false;
         try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
+        if (delivered.Contains(car.NetworkObjectId)) return "bu araç zaten teslim edildi (takıldıysa Kaldır)";
         if (!inArea || area == null)
         {
+            // Alanın dışındaki araçla teslim akışı yarıda kalıyor (ücret gelir, araç gitmez) → önce alana koy, sonra teslim
             area = csm.GetEmptyCustomerCarDeliveryArea();
             if (area == null) return "boş teslim alanı yok";
+            car.SnapCarPhysicToDeliveryAreaClientRpc(area.transform.position, area.transform.rotation);
+            pendingDeliver.Add((car, Time.time + 1.5f));
+            return "araç teslim alanına konuldu, birazdan teslim edilecek";
         }
-        csm.StartDeliverCarCoroutine(car, area);
-        Plugin.L.LogInfo($"Teslim: {CarLabel(car)} → {area.name}{(inArea ? "" : " (alana taşındı)")} ({nt})");
+        StartDeliver(csm, car, area);
         return "teslim başlatıldı";
+    }
+
+    static readonly HashSet<ulong> delivered = new();
+    static readonly List<(Car Car, float T)> pendingDeliver = new();
+
+    static void StartDeliver(CarServiceManager csm, Car car, CustomerCarDeliveryArea area)
+    {
+        delivered.Add(car.NetworkObjectId);
+        csm.StartDeliverCarCoroutine(car, area);
+        Plugin.L.LogInfo($"Teslim: {CarLabel(car)} → {area.name}");
+    }
+
+    static void PumpDeliveries()
+    {
+        for (int i = pendingDeliver.Count - 1; i >= 0; i--)
+        {
+            var (car, t) = pendingDeliver[i];
+            if (Time.time < t) continue;
+            pendingDeliver.RemoveAt(i);
+            if (car == null) continue;
+            CustomerCarDeliveryArea area = null; bool more = false;
+            bool inArea = false;
+            try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
+            var csm = UnityEngine.Object.FindObjectOfType<CarServiceManager>();
+            if (!inArea || area == null || csm == null) { Toast($"{CarLabel(car)}: teslim alanına girmedi, teslim edilmedi"); Plugin.L.LogWarning($"Teslim: {CarLabel(car)} alana girmedi"); continue; }
+            if (more) { Toast("teslim alanında birden fazla araç var"); continue; }
+            StartDeliver(csm, car, area);
+            Toast($"{CarLabel(car)}: teslim başlatıldı");
+        }
+    }
+
+    // Teslim akışı takılırsa aracı ödeme almadan sahneden kaldırır.
+    static string RemoveCar(Car car)
+    {
+        string label = CarLabel(car);
+        try { var nc = car.GetComponent<NetworkCar>(); if (nc != null) nc.DespawnCarWithPhysic(); else car.NetworkObject.Despawn(true); }
+        catch (Exception e) { try { car.NetworkObject.Despawn(true); } catch { return "kaldırılamadı: " + e.Message; } }
+        delivered.Remove(car.NetworkObjectId);
+        Plugin.L.LogInfo($"Araç kaldırıldı: {label}");
+        return "araç kaldırıldı";
     }
 
     static Car CarById(string nid)
@@ -1725,9 +1777,26 @@ static class Core
         return plate.Length > 0 ? $"{left} · {plate}".Trim(' ', '·') : left;
     }
 
+    // Tamir edildi = bütün müşteri istekleri oyuna göre %100 (ya da Teslim'e basıldı). 0.5 sn'de bir RefreshWorld'de hesaplanır.
+    static readonly HashSet<ulong> carDone = new();
+    static int carView;   // 0 = bakılacak, 1 = tamir edildi / teslim bekliyor
+    static bool IsCarDone(Car car)
+    {
+        if (delivered.Contains(car.NetworkObjectId)) return true;
+        var reqs = car.CarServiceScenario?.serviceRequests;
+        if (reqs == null || reqs.Count == 0) return false;
+        foreach (var r in reqs) if (r != null && (ReqScore(car, r) ?? 0f) < 0.999f) return false;
+        return true;
+    }
+
     static void DrawCars()
     {
+        int nDone = cars.Count(c => c != null && carDone.Contains(c.NetworkObjectId));
         Sec($"Araçlar ({cars.Count})");
+        H();
+        if (Pill(Next(170, LineH), $"Bakılacak ({cars.Count - nDone})", carView == 0)) carView = 0;
+        if (Pill(Next(230, LineH), $"Tamir edildi / teslim bekliyor ({nDone})", carView == 1)) carView = 1;
+        EH();
         repairExtras = Tgl(repairExtras, "Onar: müşteri aranmamış olsa da ek arızaları onar (aranmışsa zaten dahil)");
         if (cars.Count == 0) { Lbl("<color=#9aa0a6>Sahnede müşteri aracı yok.</color>"); return; }
         var me = LocalPlayer();
@@ -1735,6 +1804,7 @@ static class Core
         {
             if (car == null) continue;
             ulong id = car.NetworkObjectId;
+            if (carDone.Contains(id) != (carView == 1)) continue;
             string name = CarLabel(car), scen = "?";
             try { scen = car.CarServiceScenario != null ? car.CarServiceScenario.name : "-"; } catch { }
             bool open = carOpen.Contains(id);
@@ -1746,6 +1816,7 @@ static class Core
             if (Btn("Onar", 50)) Game("repair", id.ToString());
             if (Btn("Döküm", 60)) Game("dump", id.ToString());
             if (Btn("Teslim", 60)) Game("deliver", id.ToString());
+            if (Btn("Kaldır", 60)) Game("removecar", id.ToString());
             EH();
             if (!open) continue;
             Lbl($"   Teslim günü: {car.GetExpectedDeliveryDay}   Teslim alanında: {Yn(() => car.GetIsInDeliveryArea())}   Müşteri arandı: {Yn(() => car.GetIsCustomerCalled)}");
