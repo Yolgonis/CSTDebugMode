@@ -1058,8 +1058,7 @@ static class Core
                 if (c == null || !seen.Add(c.Pointer)) continue;
                 CarPartNames pn;
                 try { pn = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
-                var want = ap == CarPartNames.Wheel ? CarPartNames.Tire : ap;   // patlak lastik: tekerleğin lastik noktası
-                if (pn == want) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn)));   // sıvı her zaman doldurulur, değiştirilmez
+                if (pn == ap) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn)));   // sıvı her zaman doldurulur, değiştirilmez
             }
         }
         if (scen.serviceRequests != null)
@@ -1222,6 +1221,63 @@ static class Core
         return true;
     }
 
+    // Tekerlek: eşyadaki parçaları (jant, lastik) hash'ten tanı; değişimde lastiği en iyi uyumlu lastikle değiştir, jantı koru.
+    // Değişim istenmiyorsa (ör. hava basıncı/onarım) sadece dayanıklılığı doldur. Hiçbir şey gerekmiyorsa null döner.
+    static string RepairWheel(CarPartNodeController ctrl, bool change)
+    {
+        var old = CurrentItem(ctrl);
+        if (!ValidItem(old)) return null;
+        var hashes = new List<int>();
+        for (int i = 0; i < 8; i++)
+        {
+            int h;
+            try { h = InventoryItemExtensions.GetHashSafe(old, i); } catch { break; }
+            if (h == 0 || h == -1) break;
+            hashes.Add(h);
+        }
+        if (hashes.Count == 0) return null;
+        float dur = 1f;
+        try { dur = InventoryItemExtensions.GetNormalizedDurability(old); } catch { }
+        Items();
+        ScriptableCarPartItemBase Def(int h) => items.FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var x) && x == h);
+        int tireIdx = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
+
+        if (!change || tireIdx < 0)
+        {
+            if (dur >= 0.999f) return null;
+            for (int i = 0; i < hashes.Count; i++) ctrl.ApplyDurabilityIssue(CarPartNames.Wheel, ScriptableCarPartItemBase.MaxDurability, false, i);
+            return $"Wheel dayanıklılığı dolduruldu (%{dur * 100:0} → %100)";
+        }
+
+        var oldTire = Def(hashes[tireIdx]);
+        var tires = Items().Where(i => i.GetIl2CppType().Name == "ScriptableCarPartTire" && itemHash.ContainsKey(i.Pointer)
+                && (oldTire == null || i.compatibilityId == oldTire.compatibilityId)).ToList();
+        if (curRules != null)
+        {
+            bool Orig(ScriptableCarPartItemBase i) { try { return i.brandData != null && i.brandData.GetIsOriginal; } catch { return false; } }
+            IEnumerable<ScriptableCarPartItemBase> f = tires;
+            if (curRules.Contains(ServiceRequestCustomerRules.OriginalOnly)) f = f.Where(Orig);
+            if (curRules.Contains(ServiceRequestCustomerRules.AftermarketOnly)) f = f.Where(i => !Orig(i));
+            if (curRules.Contains(ServiceRequestCustomerRules.SameAsRemovedPart)) f = f.Where(i => itemHash[i.Pointer] == hashes[tireIdx]);
+            var fl = f.ToList();
+            if (fl.Count > 0) tires = fl;
+        }
+        var best = tires.OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).FirstOrDefault();
+        if (best == null) throw new Exception("uygun lastik yok");
+        if (hashes[tireIdx] == itemHash[best.Pointer] && dur >= 0.999f) return null;
+
+        var neu = InventoryItem.empty;
+        neu.ItemType = CarPartNames.Wheel;
+        try { neu.ItemOwner = OwnerName(); } catch { }
+        neu.sessionBasedIndex = nextSbi++;
+        for (int i = 0; i < hashes.Count; i++)
+            InventoryItemExtensions.AddPart(ref neu, i == tireIdx ? itemHash[best.Pointer] : hashes[i], ScriptableCarPartItemBase.MaxDurability);
+        ctrl.InitializeWithData(old, true);    // last = eski tekerlek (oyunun kendi yazımı)
+        ctrl.InitializeWithData(neu, false);
+        try { Inv?.AddCarPartItemWithCarPartName(CarPartNames.Wheel, old, OwnerName()); } catch { }
+        return $"Wheel lastiği ← {best.GetName} ({best.rarity}), jant korundu";
+    }
+
     static void InstallSlot(CarPartNodeController ctrl, CarPartNames pn, ScriptableCarPartItemBase item, int worst, InventoryItem worstItem)
     {
         var neu = InventoryItem.empty;
@@ -1326,6 +1382,13 @@ static class Core
                     Plugin.L.LogInfo($"Onarım: {pn} dolduruldu/şarj edildi (%{cur * 100:0} → %100) [{issue}]");
                 }
                 catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
+                continue;
+            }
+            if (pn == CarPartNames.Wheel)
+            {
+                // Tekerlek noktası jant+lastiği tek eşyada tutuyor (geçmiş log: arıza noktaları Hub/Brakepad/…/Wheel, Tire yok).
+                try { var r = RepairWheel(ctrl, change); if (r == null) already++; else { fixedN++; Plugin.L.LogInfo($"Onarım: {r} [{issue}]"); } }
+                catch (Exception e) { failed.Add($"Wheel ({e.Message})"); }
                 continue;
             }
             if (pn is CarPartNames.FuseSmall or CarPartNames.FuseMid or CarPartNames.FuseLarge)
