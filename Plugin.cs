@@ -1329,7 +1329,25 @@ static class Core
         string B(Func<bool> f) { try { return f() ? "T" : "f"; } catch { return "?"; } }
         Plugin.L.LogInfo($"── DÖKÜM #{car.NetworkObjectId} {car.GetCustomerName} • müşteri arandı={B(() => car.GetIsCustomerCalled)} • kurallar={string.Join(",", RulesOf(scen))}");
         if (scen.serviceRequests != null)
-            foreach (var r in scen.serviceRequests) if (r != null) Plugin.L.LogInfo($"   istek {r.name}: change={B(() => r.NeedChangeCarPart())} validate={ReqScore(car, r)}");
+            foreach (var r in scen.serviceRequests)
+            {
+                if (r == null) continue;
+                Plugin.L.LogInfo($"   istek {r.name}: change={B(() => r.NeedChangeCarPart())} validate={ReqScore(car, r)}");
+                if (r.carIssues == null) continue;
+                foreach (var iss in r.carIssues)
+                {
+                    if (iss == null) continue;
+                    var names = new List<string>();
+                    try
+                    {
+                        var cs = iss.GetControllers(car);
+                        if (cs != null) foreach (var c in cs) { try { names.Add($"{c.name}:{c.GetPrimaryCarPart()?.GetCarPartName()}"); } catch { names.Add(c?.name ?? "null"); } }
+                    }
+                    catch (Exception e) { names.Add("hata " + e.Message); }
+                    string ap = "?"; try { ap = iss.affectedPart.ToString(); } catch { }
+                    Plugin.L.LogInfo($"      arıza {iss.name} ({iss.GetIl2CppType().Name}) affectedPart={ap} → {string.Join(", ", names)}");
+                }
+            }
         foreach (var (ctrl, pn, issue, change) in IssueTargets(car, scen))
         {
             var p = ctrl.GetPrimaryCarPart();
