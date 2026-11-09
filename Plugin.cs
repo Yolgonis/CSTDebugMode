@@ -894,8 +894,16 @@ static class Core
     {
         if (items is { Count: > 0 }) return items;
         items = new List<ScriptableCarPartItemBase>();
+        itemHash.Clear();
         var all = ScriptableCarPartItemBase.All;
-        if (all != null) foreach (var v in all.Values) if (v != null) items.Add(v);
+        if (all != null)
+            foreach (var key in all.Keys)   // anahtar = InventoryItem.partHashes'e yazılan eşya hash'i
+            {
+                var v = all[key];
+                if (v == null) continue;
+                items.Add(v);
+                itemHash[v.Pointer] = key;
+            }
         items.Sort((a, b) => string.Compare(a.GetName, b.GetName, StringComparison.CurrentCultureIgnoreCase));
         return items;
     }
@@ -989,24 +997,136 @@ static class Core
         }
     }
 
-    // Oyunun arıza oluşturduğu çağrıyla (ApplyDurabilityIssue) her parçayı maksimum dayanıklılığa çeker. Host'ta çalışır.
-    static string RepairCar(Car car)
+    static readonly Dictionary<IntPtr, int> itemHash = new();
+
+    static int PartCount(CarPartNodeController ctrl)
     {
-        float max = ScriptableCarPartItemBase.MaxDurability;
-        int ok = 0, fail = 0;
-        foreach (var (proc, ctrl) in Controllers(car).ToList())
+        var seen = new HashSet<IntPtr>();
+        for (int i = 0; i < 16; i++)
         {
-            var seen = new HashSet<IntPtr>();
-            for (int i = 0; i < 16; i++)
+            CarPart p;
+            try { p = ctrl.GetCarPartByIndex(i); } catch { break; }
+            if (p == null || !seen.Add(p.Pointer)) break;   // index taşınca aynı parçayı döndürüyor
+        }
+        return Math.Max(1, seen.Count);
+    }
+
+    // Müşteri istekleri: kontrol noktası → onu hedefleyen istekler (oyunun kendi arıza→kontrol eşlemesiyle)
+    static Dictionary<IntPtr, List<AScriptableServiceRequest>> RequestMap(Car car, ScriptableCarServiceScenario scen, Dictionary<IntPtr, CarPartNodeController> targets)
+    {
+        var map = new Dictionary<IntPtr, List<AScriptableServiceRequest>>();
+        void AddIssue(ScriptableCarIssue issue, AScriptableServiceRequest req)
+        {
+            if (issue == null) return;
+            Il2CppSystem.Collections.Generic.List<CarPartNodeController> cs = null;
+            try { cs = issue.GetControllers(car); } catch { }
+            if (cs == null) return;
+            foreach (var c in cs)
             {
-                CarPart part;
-                try { part = ctrl.GetCarPartByIndex(i); } catch { break; }
-                if (part == null || !seen.Add(part.Pointer)) break;   // index taşınca aynı parçayı döndürüyor; tekrar sayma
-                try { proc.ApplyDurabilityIssue(part.GetCarPartName(), max, false, i); ok++; }
-                catch (Exception e) { fail++; Plugin.L.LogWarning($"Onarım {part.GetCarPartName()}: {e.Message}"); }
+                if (c == null) continue;
+                targets[c.Pointer] = c;
+                if (req == null) continue;
+                if (!map.TryGetValue(c.Pointer, out var l)) map[c.Pointer] = l = new();
+                if (!l.Contains(req)) l.Add(req);
             }
         }
-        return $"{ok} parça onarıldı" + (fail > 0 ? $", {fail} hata (log)" : "") + " — sıvılar ayrıca doldurulmalı olabilir";
+        if (scen.serviceRequests != null)
+            foreach (var req in scen.serviceRequests)
+                if (req?.carIssues != null) foreach (var issue in req.carIssues) AddIssue(issue, req);
+        if (scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, null);
+        return map;
+    }
+
+    static bool Safe(Func<bool> f) { try { return f(); } catch { return false; } }
+
+    // Oyunun kendi doğrulayıcılarına göre bu kontrol noktasında iş kaldı mı?
+    static bool CtrlDone(Car car, CarPartNodeController c, List<AScriptableServiceRequest> reqs)
+    {
+        if (reqs != null) foreach (var r in reqs) if (!Safe(() => r.IsControllerFixed(car, c))) return false;
+        if (Safe(() => ServiceRequestSystem.GetNeededRepair(c)) && !Safe(() => ServiceRequestSystem.GetRepaired(c))) return false;
+        if (Safe(() => ServiceRequestSystem.GetLiquidNeededRepair(c)) && !Safe(() => ServiceRequestSystem.GetLiquidRepaired(c))) return false;
+        if (Safe(() => ServiceRequestSystem.GetSecondaryNeedRepair(c)) && !Safe(() => ServiceRequestSystem.GetSecondaryRepaired(c))) return false;
+        return true;
+    }
+
+    // Kontrol noktasına uyan eşyalar: en yüksek nadirlik, sonra en pahalı önce
+    static List<ScriptableCarPartItemBase> Candidates(CarPartNodeController ctrl, CarPartNames pn)
+    {
+        var ids = ctrl.compatibilityIds;
+        return Items().Where(i => PartOf(i) == pn && itemHash.ContainsKey(i.Pointer)
+                && (ids == null || ids.Count == 0 || ids.Contains(i.compatibilityId)))
+            .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
+    }
+
+    static void Install(CarPartNodeController ctrl, CarPartNames pn, ScriptableCarPartItemBase item, int count)
+    {
+        var inv = InventoryItem.empty;
+        inv.ItemType = pn;
+        for (int i = 0; i < count; i++) InventoryItemExtensions.AddPart(ref inv, itemHash[item.Pointer], ScriptableCarPartItemBase.MaxDurability);
+        ctrl.InitializeWithData(inv, true);   // true: eskisi "son sökülen" olur, gerçek değişim gibi
+    }
+
+    // Müşterinin istediklerini oyunun doğrulayıcısı "tamam" diyene kadar en iyi eşyadan başlayarak yapar. Host'ta çalışır.
+    static string RepairCar(Car car)
+    {
+        var scen = car.CarServiceScenario;
+        if (scen == null) return "aracın senaryosu yok";
+        var targets = new Dictionary<IntPtr, CarPartNodeController>();
+        var reqMap = RequestMap(car, scen, targets);
+        foreach (var (_, c) in Controllers(car))   // senaryoda yazmasa da oyunun "onarım gerekli" dediği noktalar
+            if (!CtrlDone(car, c, null)) targets[c.Pointer] = c;
+
+        int fixedN = 0, already = 0;
+        var failed = new List<string>();
+        foreach (var ctrl in targets.Values)
+        {
+            reqMap.TryGetValue(ctrl.Pointer, out var reqs);
+            if (CtrlDone(car, ctrl, reqs)) { already++; continue; }
+            CarPartNames pn;
+            try { pn = ctrl.GetPrimaryCarPart().GetCarPartName(); } catch { failed.Add(ctrl.name); continue; }
+            var cands = Candidates(ctrl, pn);
+            if (cands.Count == 0) { failed.Add($"{pn} (uygun eşya yok)"); continue; }
+            int n = PartCount(ctrl);
+            bool done = false;
+            foreach (var cand in cands.Take(15))
+            {
+                try { Install(ctrl, pn, cand, n); }
+                catch (Exception e) { Plugin.L.LogWarning($"Takma {pn} ← {cand.GetName}: {e.Message}"); continue; }
+                if (CtrlDone(car, ctrl, reqs)) { done = true; Plugin.L.LogInfo($"Onarım: {pn} ← {cand.GetName} ({cand.rarity})"); break; }
+            }
+            if (done) fixedN++;
+            else
+            {
+                Install(ctrl, pn, cands[0], n);   // hiçbiri doğrulanamadıysa en iyisi takılı kalsın
+                failed.Add($"{pn} (doğrulanamadı)");
+            }
+        }
+
+        // kaporta: paslı parçaları temizle + boyalı say, yıkama istendiyse yıka
+        string body = "";
+        try
+        {
+            var layer = car.carBodyLayerController;
+            var rust = scen.rustyParts;
+            if (layer != null && rust != BodyPartTypes.None)
+            {
+                layer.SetRustyParts(BodyPartTypes.None);
+                layer.AddGrindParts(rust);
+                layer.AddPaintedParts(rust);
+                body += $", pas/boya: {rust}";
+            }
+            bool wash = false;
+            if (scen.extraIssues != null) foreach (var i in scen.extraIssues) wash |= i != null && i.affectedPart == CarPartNames.CarWash;
+            if (scen.serviceRequests != null)
+                foreach (var r in scen.serviceRequests)
+                    if (r?.carIssues != null) foreach (var i in r.carIssues) wash |= i != null && i.affectedPart == CarPartNames.CarWash;
+            if (layer != null && wash) { layer.WashCar(); layer.SetCarDirtPercentage(0f); layer.SetGlassDirtPercentage(0f); body += ", yıkandı"; }
+        }
+        catch (Exception e) { body += ", kaporta hatası: " + e.Message; }
+
+        var msg = $"{fixedN} nokta onarıldı, {already} zaten tamamdı{body}";
+        if (failed.Count > 0) { msg += $", {failed.Count} yapılamadı"; Plugin.L.LogWarning("Onarılamayan: " + string.Join(", ", failed)); }
+        return msg;
     }
 
     static Car CarById(string nid)
