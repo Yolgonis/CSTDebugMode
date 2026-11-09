@@ -39,6 +39,7 @@ public class Plugin : BasePlugin
         // Debug ile değiştirilmiş oturum herkese açık sıralamayı kirletmesin.
         h.Patch(HarmonyLib.AccessTools.Method(typeof(Steamworks.SteamUserStats), "UploadLeaderboardScore"),
             prefix: new HarmonyLib.HarmonyMethod(typeof(Plugin), nameof(SkipUpload)));
+        Core.BindConfig(Config);
         AddComponent<DebugBehaviour>();
         L.LogInfo("CST Debug Mode yüklendi — F8 menü, F9 HUD, F10 uçma");
     }
@@ -586,12 +587,68 @@ static class Core
     static string SafeRun(Func<string> f) { try { return f(); } catch (Exception e) { return "hata: " + (e.InnerException?.Message ?? e.Message); } }
 
     // ───────────────────────── GUI ─────────────────────────
-
     // Oyunun build'inde GUILayout motoru stripped (BeginArea/Space/GetLast "unstripping failed").
-    // Bu yüzden sağlam kalan Rect tabanlı GUI.* ile basit bir satır-satır yerleşim.
-    const float LineH = 22f, Gap = 4f;
+    // Bu yüzden sağlam kalan Rect tabanlı GUI.* ile basit bir satır-satır yerleşim + DrawTexture ile çizilmiş tema.
+    const float LineH = 24f, Gap = 5f, TitleH = 36f, Grip = 18f, MinW = 460f, MinH = 320f;
     static float lx, lw, cx, cy, rowH, contentH = 1000f, visTop = float.MinValue, visBot = float.MaxValue;
     static bool inRow;
+
+    // tema
+    static readonly Color CBg = new(0.075f, 0.082f, 0.10f, 0.97f), CTitle = new(0.11f, 0.12f, 0.15f, 1f),
+        CCtl = new(0.17f, 0.18f, 0.22f, 1f), CCtlHover = new(0.23f, 0.25f, 0.30f, 1f), CField = new(0.05f, 0.055f, 0.07f, 1f),
+        CAccent = new(1f, 0.55f, 0.12f, 1f), CText = new(0.90f, 0.91f, 0.93f, 1f), CMuted = new(0.60f, 0.63f, 0.68f, 1f),
+        CShadow = new(0f, 0f, 0f, 0.45f);
+    static Texture2D white;
+    static GUIStyle sLabel, sCenter, sTitle, sSection, sField, sHud, sNone, sThumb;
+
+    // pencere (1080p uzayında); konum/boyut BepInEx config'de saklanır
+    static Rect win = new(16, 50, 700, 900);
+    static int drag;   // 0 yok, 1 taşı, 2 boyutlandır
+    static Vector2 dragOff;
+    static BepInEx.Configuration.ConfigEntry<string> winCfg;
+
+    internal static void BindConfig(BepInEx.Configuration.ConfigFile cfg)
+    {
+        winCfg = cfg.Bind("Menu", "Window", "16,50,700,900", "Menü konumu ve boyutu: x,y,genişlik,yükseklik (1080p ölçeğinde)");
+        var p = winCfg.Value.Split(',');
+        if (p.Length == 4 && p.All(x => float.TryParse(x, NumberStyles.Float, CultureInfo.InvariantCulture, out _)))
+            win = new Rect(F(p[0]), F(p[1]), Mathf.Max(MinW, F(p[2])), Mathf.Max(MinH, F(p[3])));
+    }
+
+    static void SaveWin() =>
+        winCfg.Value = string.Join(",", new[] { win.x, win.y, win.width, win.height }.Select(v => v.ToString("0", CultureInfo.InvariantCulture)));
+
+    static GUIStyle Style(Color c, int size = 13, TextAnchor a = TextAnchor.MiddleLeft, bool bold = false)
+    {
+        var st = new GUIStyle { richText = true, wordWrap = false, fontSize = size, alignment = a, clipping = TextClipping.Clip };
+        if (bold) st.fontStyle = FontStyle.Bold;
+        st.normal = new GUIStyleState { textColor = c };
+        st.hover = new GUIStyleState { textColor = c };
+        st.active = new GUIStyleState { textColor = c };
+        return st;
+    }
+
+    static void EnsureTheme()
+    {
+        if (white != null && sLabel != null) return;
+        white = new Texture2D(1, 1) { hideFlags = HideFlags.HideAndDontSave };   // sahne değişiminde Unload edilmesin
+        white.SetPixel(0, 0, Color.white);
+        white.Apply();
+        sLabel = Style(CText);
+        sCenter = Style(CText, 13, TextAnchor.MiddleCenter);
+        sTitle = Style(CText, 15, TextAnchor.MiddleLeft, true);
+        sSection = Style(CAccent, 12, TextAnchor.MiddleLeft, true);
+        sField = Style(CText);
+        sHud = Style(CText, 13, TextAnchor.UpperLeft);
+        sNone = new GUIStyle();
+        sThumb = new GUIStyle { fixedWidth = 14, fixedHeight = 14 };
+    }
+
+    static void Fill(Rect r, Color c, float rad = 0f) =>
+        GUI.DrawTexture(r, white, ScaleMode.StretchToFill, true, 0f, c, Vector4.zero, rad);
+    static void Fill(Rect r, Color c, Vector4 radii) =>
+        GUI.DrawTexture(r, white, ScaleMode.StretchToFill, true, 0f, c, Vector4.zero, radii);
+    static bool Hover(Rect r) => r.Contains(Event.current.mousePosition);
 
     static Rect Next(float w, float h)
     {
@@ -605,51 +662,140 @@ static class Core
 
     static bool Vis(Rect r) => r.yMax >= visTop && r.y <= visBot;   // kaydırma alanı dışını çizme
     // shortcut: metin genişliği kaba tahmin (CalcSize'a güvenmiyoruz), çok uzun buton yazılarında taşabilir
-    static float TextW(string s) => 18f + 7.5f * System.Text.RegularExpressions.Regex.Replace(s, "<[^>]+>", "").Length;
+    static float TextW(string s) => 22f + 7.5f * System.Text.RegularExpressions.Regex.Replace(s, "<[^>]+>", "").Length;
 
     static bool Btn(string s) => Btn(s, inRow ? TextW(s) : 0);
-    static bool Btn(string s, float w) { var r = Next(w, LineH); return Vis(r) && GUI.Button(r, s); }
+    static bool Btn(string s, float w) => Pill(Next(w, LineH), s, false);
+
+    static bool Pill(Rect r, string s, bool active)
+    {
+        if (!Vis(r)) return false;
+        Fill(r, active ? CAccent : Hover(r) ? CCtlHover : CCtl, 6f);
+        GUI.Label(r, active ? $"<b><color=#111111>{s}</color></b>" : s, sCenter);
+        return GUI.Button(r, "", sNone);
+    }
+
     static void Lbl(string s) => Lbl(s, 0);
     static void Lbl(string s, float w)
     {
         var r = Next(w, LineH * (1 + s.Count(c => c == '\n')));
-        if (Vis(r)) GUI.Label(r, s);
+        if (Vis(r)) GUI.Label(r, s, sLabel);
     }
-    static string Txt(string s, float w) { var r = Next(w, LineH); return Vis(r) ? GUI.TextField(r, s ?? "") : s; }
-    static bool Tgl(bool v, string s) { var r = Next(inRow ? TextW(s) + 20 : 0, LineH); return Vis(r) ? GUI.Toggle(r, v, s) : v; }
+
+    static void Sec(string s)
+    {
+        Space(6);
+        var r = Next(0, 20);
+        if (!Vis(r)) return;
+        GUI.Label(r, s.ToUpperInvariant(), sSection);
+        Fill(new Rect(r.x, r.yMax, r.width, 1), new Color(CAccent.r, CAccent.g, CAccent.b, 0.35f));
+    }
+
+    static string Txt(string s, float w)
+    {
+        var r = Next(w, LineH);
+        if (!Vis(r)) return s;
+        Fill(r, CField, 5f);
+        Fill(new Rect(r.x, r.yMax - 2, r.width, 2), Hover(r) ? CAccent : CCtl, new Vector4(0, 0, 5, 5));
+        return GUI.TextField(new Rect(r.x + 6, r.y, r.width - 12, r.height), s ?? "", sField);
+    }
+
+    static bool Tgl(bool v, string s)
+    {
+        var r = Next(inRow ? TextW(s) + 26 : 0, LineH);
+        if (!Vis(r)) return v;
+        var box = new Rect(r.x + 2, r.y + 4, 16, 16);
+        Fill(box, v ? CAccent : Hover(r) ? CCtlHover : CCtl, 4f);
+        if (v) Fill(new Rect(box.x + 5, box.y + 5, 6, 6), new Color(0.07f, 0.07f, 0.08f, 1f), 2f);
+        GUI.Label(new Rect(r.x + 24, r.y, r.width - 24, r.height), s, sLabel);
+        return GUI.Button(r, "", sNone) ? !v : v;
+    }
+
     static float Sld(float v, float a, float b, float w = 0)
     {
         var r = Next(w, LineH);
-        return Vis(r) ? GUI.HorizontalSlider(new Rect(r.x, r.y + 6, r.width, 14), v, a, b) : v;
+        if (!Vis(r)) return v;
+        float t = Mathf.InverseLerp(a, b, v);
+        var track = new Rect(r.x, r.y + r.height / 2 - 3, r.width, 6);
+        Fill(track, CCtl, 3f);
+        Fill(new Rect(track.x, track.y, track.width * t, track.height), CAccent, 3f);
+        Fill(new Rect(track.x + track.width * t - 7, r.y + r.height / 2 - 7, 14, 14), CText, 7f);
+        return GUI.HorizontalSlider(r, v, a, b, sNone, sThumb);
     }
+
     static void H() { inRow = true; cx = lx; rowH = LineH; }
     static void EH() { inRow = false; cy += rowH + Gap; }
     static void Space(float f) => cy += f;
+
+    // Başlık çubuğundan taşı, sağ alt köşeden boyutlandır. Kontrollerden önce çalışır ki olayı onlar yutmasın.
+    static void WindowInput(Rect title, Rect grip, Rect close, float sw, float sh)
+    {
+        var e = Event.current;
+        var m = e.mousePosition;
+        switch (e.type)
+        {
+            case EventType.MouseDown when grip.Contains(m):
+                drag = 2; dragOff = new Vector2(win.xMax - m.x, win.yMax - m.y); e.Use(); break;
+            case EventType.MouseDown when title.Contains(m) && !close.Contains(m):
+                drag = 1; dragOff = m - win.position; e.Use(); break;
+            case EventType.MouseDrag when drag == 1:
+                win.position = new Vector2(Mathf.Clamp(m.x - dragOff.x, -win.width + 120, sw - 120), Mathf.Clamp(m.y - dragOff.y, 0, sh - TitleH));
+                e.Use(); break;
+            case EventType.MouseDrag when drag == 2:
+                win.width = Mathf.Clamp(m.x + dragOff.x - win.x, MinW, sw - win.x);
+                win.height = Mathf.Clamp(m.y + dragOff.y - win.y, MinH, sh - win.y);
+                e.Use(); break;
+            case EventType.MouseUp when drag != 0:
+                drag = 0; SaveWin(); e.Use(); break;
+        }
+    }
 
     internal static void OnGUI()
     {
         float s = Screen.height / 1080f;   // 1440p'de okunur boyut
         GUI.matrix = Matrix4x4.Scale(new Vector3(s, s, 1f));
-        float sw = Screen.width / s;
-        GUI.skin.label.richText = GUI.skin.toggle.richText = GUI.skin.button.richText = true;
+        float sw = Screen.width / s, sh = 1080f;
+        EnsureTheme();
+        visTop = float.MinValue; visBot = float.MaxValue;
 
-        if (Time.unscaledTime < toastUntil) GUI.Box(new Rect(sw / 2 - 300, 12, 600, 28), toast);
+        if (Time.unscaledTime < toastUntil)
+        {
+            var tr = new Rect(sw / 2 - 300, 14, 600, 32);
+            Fill(tr, CBg, 8f);
+            Fill(new Rect(tr.x, tr.y, 4, tr.height), CAccent, new Vector4(8, 0, 0, 8));
+            GUI.Label(tr, toast, sCenter);
+        }
         if (hud) DrawHud(sw);
         if (!menu) return;
 
-        GUI.Label(new Rect(sw / 2 - 5, 540 - 12, 20, 24), "<b>+</b>");
-        var r = new Rect(16, 50, 680, 1010);
-        GUI.Box(r, ""); GUI.Box(r, "");   // iki kat = daha opak
-        lx = r.x + 8; lw = r.width - 16; cy = r.y + 6; inRow = false;
-        visTop = float.MinValue; visBot = float.MaxValue;
-        Lbl("<b><size=16>CST DEBUG MODE</size></b>   F8 menü • F9 HUD • F10 uçma");
+        GUI.Label(new Rect(sw / 2 - 10, 540 - 12, 20, 24), "<b>+</b>", sCenter);
+
+        var titleR = new Rect(win.x, win.y, win.width, TitleH);
+        var closeR = new Rect(win.xMax - 34, win.y + 6, 26, 24);
+        var gripR = new Rect(win.xMax - Grip, win.yMax - Grip, Grip, Grip);
+        WindowInput(titleR, gripR, closeR, sw, sh);
+
+        // çerçeve
+        Fill(new Rect(win.x + 4, win.y + 6, win.width, win.height), CShadow, 12f);
+        Fill(win, CBg, 10f);
+        Fill(titleR, CTitle, new Vector4(10, 10, 0, 0));
+        Fill(new Rect(win.x, win.y + TitleH - 2, win.width, 2), CAccent);
+        GUI.Label(new Rect(win.x + 14, win.y, 300, TitleH), "CST DEBUG MODE", sTitle);
+        GUI.Label(new Rect(win.x + 170, win.y, win.width - 220, TitleH),
+            $"<color=#9aa0a6>{Role} • {1f / smoothDt:0} FPS • F8 kapat</color>", sLabel);
+        if (Pill(closeR, "X", false)) ToggleMenu();
+
+        // sekmeler
+        lx = win.x + 12; lw = win.width - 24; cy = win.y + TitleH + 10; inRow = false;
         H();
-        for (int i = 0; i < Tabs.Length; i++) if (Btn(i == tab ? $"<b>[{Tabs[i]}]</b>" : Tabs[i])) tab = i;
+        for (int i = 0; i < Tabs.Length; i++)
+            if (Pill(Next(TextW(Tabs[i]) + 10, 28), Tabs[i], i == tab)) { tab = i; scroll = Vector2.zero; }
         EH();
 
-        var view = new Rect(lx, cy + 4, lw, r.yMax - cy - 12);
+        // içerik
+        var view = new Rect(lx, cy + 2, lw, win.yMax - cy - Grip - 6);
         scroll = GUI.BeginScrollView(view, scroll, new Rect(0, 0, view.width - 20, Mathf.Max(contentH, view.height)));
-        lx = 0; lw = view.width - 24; cy = 0;
+        lx = 0; lw = view.width - 22; cy = 0;
         visTop = scroll.y - 60; visBot = scroll.y + view.height + 60;
         switch (tab)
         {
@@ -659,8 +805,14 @@ static class Core
             case 3: DrawInspector(); break;
             case 4: DrawConsole(); break;
         }
-        contentH = cy;   // bir sonraki karede kaydırma yüksekliği
+        contentH = cy + 8;   // bir sonraki karede kaydırma yüksekliği
         GUI.EndScrollView();
+
+        // boyutlandırma tutamacı
+        var gc = drag == 2 || Hover(gripR) ? CAccent : CMuted;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j <= i; j++)
+                Fill(new Rect(gripR.xMax - 5 - (i - j) * 5, gripR.yMax - 5 - j * 5, 3, 3), gc, 1f);
     }
 
     static string Role => !Online ? "Çevrimdışı" : NM.IsHost ? "HOST" : NM.IsServer ? "SERVER" : "CLIENT";
@@ -668,21 +820,25 @@ static class Core
     static void DrawHud(float sw)
     {
         var sb = new StringBuilder();
-        sb.Append($"<b>{1f / smoothDt:0} FPS</b>  {smoothDt * 1000f:0.0} ms  {SystemInfo.graphicsDeviceType}\n");
-        sb.Append($"{Role}");
+        sb.Append($"<b><size=15>{1f / smoothDt:0} FPS</size></b>  <color=#9aa0a6>{smoothDt * 1000f:0.0} ms • {SystemInfo.graphicsDeviceType}</color>\n");
+        sb.Append($"<color=#ff8c1f>{Role}</color>");
         if (Online) sb.Append($"  id {NM.LocalClientId}  ping {(NM.IsServer ? 0 : Rtt(NetworkManager.ServerClientId))} ms");
         var p = LocalPlayer();
-        if (p != null) sb.Append($"\npos {V(p.transform.position)}");
+        if (p != null) sb.Append($"\n<color=#9aa0a6>pos</color> {V(p.transform.position)}");
         if (Math.Abs(Time.timeScale - 1f) > 0.001f) sb.Append($"\n<color=yellow>timeScale {Time.timeScale:0.##}</color>");
         if (fly) sb.Append("\n<color=cyan>UÇMA</color>");
-        if (errorCount > 0) sb.Append($"\n<color=red>{errorCount} hata</color> (Konsol)");
-        GUI.Box(new Rect(sw - 336, 50, 320, 110), "");
-        GUI.Label(new Rect(sw - 328, 54, 310, 110), sb.ToString());
+        if (errorCount > 0) sb.Append($"\n<color=#ff6060>{errorCount} hata</color> <color=#9aa0a6>(Konsol)</color>");
+        var text = sb.ToString();
+        var r = new Rect(sw - 316, 16, 300, 16 + (1 + text.Count(c => c == '\n')) * 20);
+        Fill(r, CBg, 8f);
+        Fill(new Rect(r.x, r.y, 3, r.height), CAccent, new Vector4(8, 0, 0, 8));
+        GUI.Label(new Rect(r.x + 12, r.y + 8, r.width - 20, r.height - 10), text, sHud);
     }
+
 
     static void DrawGeneral()
     {
-        Lbl("<b>Grafik</b>");
+        Sec("Grafik");
         Lbl($"API: <b>{SystemInfo.graphicsDeviceType}</b>   GPU: {SystemInfo.graphicsDeviceName}   VRAM: {SystemInfo.graphicsMemorySize} MB");
         Lbl($"Çözünürlük: {Screen.width}x{Screen.height}   Sahne: {SceneManager.GetActiveScene().name}");
         Lbl($"Bellek (Unity): {UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong() / 1048576} MB   FPS: {1f / smoothDt:0}");
@@ -693,7 +849,7 @@ static class Core
         EH();
 
         Space(8);
-        Lbl($"<b>Zaman ölçeği</b>: {Time.timeScale:0.00}" + (PureClient ? "  (yalnız host değiştirir)" : "  (istemcilere de uygulanır)"));
+        Sec("Zaman ölçeği"); Lbl($"Şu an: {Time.timeScale:0.00}" + (PureClient ? "  (yalnız host değiştirir)" : "  (istemcilere de uygulanır)"));
         H();
         timeScale = Sld(timeScale, 0f, 5f, 420);
         if (Btn("Uygula", 70)) SetTimeScale(timeScale);
@@ -721,7 +877,7 @@ static class Core
         }
 
         Space(6);
-        Lbl("<b>Oyuncular</b>");
+        Sec("Oyuncular");
         var me = LocalPlayer();
         foreach (var n in snap.Where(x => x.Player))
         {
@@ -734,7 +890,7 @@ static class Core
         }
 
         Space(6);
-        H(); Lbl("<b>Ağ nesneleri</b> filtre:", 160); objFilter = Txt(objFilter, 200); EH();
+        Sec("Ağ nesneleri"); H(); Lbl("Filtre:", 60); objFilter = Txt(objFilter, 200); EH();
         int shown = 0;
         foreach (var n in snap)
         {
@@ -761,7 +917,7 @@ static class Core
         EH();
 
         Space(6);
-        Lbl("<b>Konum slotları</b>");
+        Sec("Konum slotları");
         for (int i = 0; i < slots.Length; i++)
         {
             H();
@@ -772,7 +928,7 @@ static class Core
         }
 
         Space(6);
-        Lbl("<b>Nişangah (+) altındaki nesne</b>");
+        Sec("Nişangah (+) altındaki nesne");
         if (!hasHit || hit.collider == null) { Lbl("— hiçbir şey —"); return; }
         var go = hit.collider.gameObject;
         var no = go.GetComponentInParent<NetworkObject>();
@@ -800,7 +956,7 @@ static class Core
 
     static void DrawInspector()
     {
-        Lbl("Hızlı:");
+        Sec("Hızlı bul");
         H();
         foreach (var n in Presets)
             if (Btn(n))
