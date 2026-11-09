@@ -511,20 +511,24 @@ static class Core
         return t.FullName switch
         {
             "System.String" => new Il2CppSystem.String(IL2CPP.ManagedStringToIl2Cpp(s)),
-            "System.Int32" => new Il2CppSystem.Int32 { m_value = int.Parse(n, ci) }.BoxIl2CppObject(),
-            "System.Int64" => new Il2CppSystem.Int64 { m_value = long.Parse(n, ci) }.BoxIl2CppObject(),
-            "System.UInt64" => new Il2CppSystem.UInt64 { m_value = ulong.Parse(n, ci) }.BoxIl2CppObject(),
-            "System.Single" => new Il2CppSystem.Single { m_value = float.Parse(n, ci) }.BoxIl2CppObject(),
-            "System.Double" => new Il2CppSystem.Double { m_value = double.Parse(n, ci) }.BoxIl2CppObject(),
-            "System.Boolean" => new Il2CppSystem.Boolean { m_value = n.ToLowerInvariant() switch
+            "System.Int32" => BoxV(int.Parse(n, ci)),
+            "System.Int64" => BoxV(long.Parse(n, ci)),
+            "System.UInt64" => BoxV(ulong.Parse(n, ci)),
+            "System.Single" => BoxV(float.Parse(n, ci)),
+            "System.Double" => BoxV(double.Parse(n, ci)),
+            "System.Boolean" => BoxV(n.ToLowerInvariant() switch
             {
                 "1" or "true" or "evet" => true,
                 "0" or "false" or "hayır" => false,
                 _ => throw new FormatException("bool bekleniyor: 1/0, true/false, evet/hayır"),
-            } }.BoxIl2CppObject(),
+            }),
             _ => throw new NotSupportedException(t.FullName),
         };
     }
+
+    // interop primitive struct'ları salt okunur; native il2cpp box en doğrudan yol
+    static unsafe IObj BoxV<T>(T v) where T : struct
+        => new IObj(IL2CPP.il2cpp_value_box(Il2CppClassPointerStore<T>.NativeClassPtr, (IntPtr)System.Runtime.CompilerServices.Unsafe.AsPointer(ref v)));
 
     static string SetField(Component c, string name, string val)
     {
