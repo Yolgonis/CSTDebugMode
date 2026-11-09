@@ -1068,11 +1068,11 @@ static class Core
     static bool repairExtras;   // senaryonun müşteri istemediği ek arızalarını da onar
     static readonly HashSet<CarPartNames> Liquids = new() { CarPartNames.EngineOil, CarPartNames.BrakeSystemFluid, CarPartNames.PowerSteeringFluid, CarPartNames.CoolingRadiatorWater, CarPartNames.WindscreenWasherFluid, CarPartNames.GearOil };
 
-    static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue, bool Change, ScriptableCarIssue Src)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
+    static List<(CarPartNodeController Ctrl, CarPartNames Part, string Issue, bool Change, ScriptableCarIssue Src, AScriptableServiceRequest Req)> IssueTargets(Car car, ScriptableCarServiceScenario scen)
     {
-        var res = new List<(CarPartNodeController, CarPartNames, string, bool, ScriptableCarIssue)>();
+        var res = new List<(CarPartNodeController, CarPartNames, string, bool, ScriptableCarIssue, AScriptableServiceRequest)>();
         var seen = new HashSet<IntPtr>();
-        void AddIssue(ScriptableCarIssue issue, bool change)
+        void AddIssue(ScriptableCarIssue issue, bool change, AScriptableServiceRequest req)
         {
             if (issue == null) return;
             CarPartNames ap;
@@ -1087,7 +1087,7 @@ static class Core
                 CarPartNames pn;
                 try { pn = c.GetPrimaryCarPart().GetCarPartName(); } catch { continue; }
                 // lastik arızası (affectedPart=Tire) teker noktasında: jant+lastik tek eşya (Döküm: RightBackTireIssue → wheelset:Wheel)
-                if (pn == ap || (ap == CarPartNames.Tire && pn == CarPartNames.Wheel)) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn), issue));   // sıvı her zaman doldurulur, değiştirilmez
+                if (pn == ap || (ap == CarPartNames.Tire && pn == CarPartNames.Wheel)) res.Add((c, pn, issue.name, change && !Liquids.Contains(pn), issue, req));   // sıvı her zaman doldurulur, değiştirilmez
             }
         }
         if (scen.serviceRequests != null)
@@ -1096,11 +1096,11 @@ static class Core
                     if (req?.carIssues == null) continue;
                     bool change = true;
                     try { change = req.NeedChangeCarPart(); } catch { }   // şarj/dolum isteklerinde parça değiştirmek "yanlış işlem"
-                    foreach (var issue in req.carIssues) AddIssue(issue, change);
+                    foreach (var issue in req.carIssues) AddIssue(issue, change, req);
                 }
         bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
         bool noExtras = RulesOf(scen).Contains(ServiceRequestCustomerRules.NoExtraFixes);   // müşteri ek tamir istemiyor → bedel yazılır
-        if ((repairExtras || called) && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, !(issue?.name ?? "").Contains("Charge", StringComparison.OrdinalIgnoreCase));   // isteği olmayan ek arıza: "Charge…" şarj, gerisi değişim
+        if ((repairExtras || called) && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, !(issue?.name ?? "").Contains("Charge", StringComparison.OrdinalIgnoreCase), null);   // isteği olmayan ek arıza: "Charge…" şarj, gerisi değişim
         return res;
     }
 
@@ -1232,6 +1232,57 @@ static class Core
         }
         catch { }
         return res;
+    }
+
+    static Func<ScriptableCarPartItemBase, bool> ReqFilter(AScriptableServiceRequest req)
+    {
+        if (req == null) return null;
+        try
+        {
+            var w = req.TryCast<ScriptableServiceRequestSpacerWidthX>();
+            if (w != null) { int n = w.needSpacerWidth; return i => i.TryCast<ScriptableCarPartSpacer>()?.GetSpacerWidth == n; }
+            var c = req.TryCast<ScriptableServiceRequestSpacerCountX>();
+            if (c != null) { int n = c.needSpacerCount; return i => i.TryCast<ScriptableCarPartSpacer>()?.GetSpacerCount == n; }
+        }
+        catch { }
+        return null;
+    }
+
+    // Boya isteği: istenen renk istekte saklı değil (yalnızca parçalar); oyunun kendi Validate'i ile renk aranır.
+    // Önce addaki renk tahmini, sonra ton/doygunluk/parlaklık taraması. Bulunamazsa eski renk geri yüklenir.
+    static readonly (string Name, float H, float S, float V)[] ColorGuess =
+    {
+        ("Red", 0f, 1f, .8f), ("Orange", .08f, 1f, .9f), ("Yellow", .16f, 1f, .9f), ("Green", .33f, 1f, .7f), ("Cyan", .5f, 1f, .8f),
+        ("Blue", .63f, 1f, .7f), ("Purple", .77f, .8f, .6f), ("Pink", .9f, .6f, .9f), ("White", 0f, 0f, 1f), ("Black", 0f, 0f, .05f),
+        ("Grey", 0f, 0f, .5f), ("Gray", 0f, 0f, .5f), ("Silver", 0f, 0f, .75f), ("Brown", .07f, .7f, .4f),
+    };
+    static string PaintRequest(Car car, CarBodyLayerController layer, ScriptablePaintBodyPartServiceRequest pr)
+    {
+        if ((ReqScore(car, pr) ?? 0f) >= 0.999f) return null;
+        BodyPartTypes parts = BodyPartTypes.None;
+        try { parts = pr.GetRequiredPaint(layer.GetCarVisualData); } catch { }
+        if (parts == BodyPartTypes.None) try { parts = pr.requiredPaint; } catch { }
+        var orig = layer.GetPaintData();
+        Plugin.L.LogInfo($"Boya: {pr.name} parçalar={parts} mevcut hsv=({orig.hue:0.###},{orig.saturation:0.###},{orig.brightness:0.###})");
+        layer.SetRustyParts(layer.GetRustyParts & ~parts);
+        layer.AddGrindParts(parts);
+        layer.AddPaintedParts(parts);
+        float scale = orig.hue > 1.01f ? 360f : 1f;   // ton 0-1 mi 0-360 mı, mevcut değerden anla
+        bool Try(float h, float sat, float v)
+        {
+            var pd = orig; pd.hue = h * scale; pd.saturation = sat; pd.brightness = v;
+            layer.SetPaintData(pd);
+            return (ReqScore(car, pr) ?? 0f) >= 0.999f;
+        }
+        if ((ReqScore(car, pr) ?? 0f) >= 0.999f) return $"{parts} boyandı (mevcut renk uydu)";
+        foreach (var g in ColorGuess)
+            if (pr.name.Contains(g.Name, StringComparison.OrdinalIgnoreCase) && Try(g.H, g.S, g.V)) return $"{parts} boyandı ({g.Name})";
+        foreach (var v in new[] { .9f, .7f, .5f, .3f, 1f, .1f })
+            foreach (var sat in new[] { 1f, .75f, .5f, .25f, 0f })
+                for (int h = 0; h < 48; h++)
+                    if (Try(h / 48f, sat, v)) return $"{parts} boyandı (hsv {h / 48f:0.##},{sat},{v})";
+        layer.SetPaintData(orig);
+        throw new Exception($"{pr.name}: uyan renk bulunamadı, eski renk geri yüklendi");
     }
 
     static string B(Func<bool> f) { try { return f() ? "T" : "f"; } catch { return "?"; } }
@@ -1407,7 +1458,7 @@ static class Core
                     Plugin.L.LogInfo($"      arıza {iss.name} ({iss.GetIl2CppType().Name}) affectedPart={ap}{(bi.Count > 0 ? " yanık yuva=" + string.Join(",", bi) : "")} → {string.Join(", ", names)}");
                 }
             }
-        foreach (var (ctrl, pn, issue, change, src) in IssueTargets(car, scen))
+        foreach (var (ctrl, pn, issue, change, src, req) in IssueTargets(car, scen))
         {
             var p = ctrl.GetPrimaryCarPart();
             string cur = "?", last = "?", inst = "?", t = "?";
@@ -1457,7 +1508,7 @@ static class Core
     {
         int fixedN = 0, already = 0, idx = -1;
         var failed = new List<string>();
-        foreach (var (ctrl, pn, issue, change, src) in IssueTargets(car, scen))
+        foreach (var (ctrl, pn, issue, change, src, req) in IssueTargets(car, scen))
         {
             if (only != null && !only.Contains(++idx)) continue;
             if (!change)
@@ -1544,6 +1595,12 @@ static class Core
                 continue;
             }
             var cands = Candidates(ctrl, pn, CurrentHash(ctrl));   // eski parçayla aynı özellik öncelikli
+            var need = ReqFilter(req);   // istek belirli bir özellik istiyorsa (ör. spacer genişliği 12) eskisine değil isteğe uy
+            if (need != null)
+            {
+                cands = Candidates(ctrl, pn).Where(need).ToList();
+                if (cands.Count == 0) { failed.Add($"{pn} (isteğe uyan eşya yok: {req.name})"); continue; }
+            }
             if (cands.Count == 0) { failed.Add($"{pn} (uygun eşya yok)"); continue; }
             var best = cands[0];
             if (CurrentHash(ctrl) == itemHash[best.Pointer] && Mathf.Approximately(InventoryItemExtensions.GetNormalizedDurability(CurrentItem(ctrl)), 1f))
@@ -1578,6 +1635,14 @@ static class Core
                 layer.AddPaintedParts(rust);
                 body += $", pas/boya: {rust}";
             }
+            if (layer != null && scen.serviceRequests != null)
+                foreach (var r in scen.serviceRequests)
+                {
+                    var pr = r?.TryCast<ScriptablePaintBodyPartServiceRequest>();
+                    if (pr == null) continue;
+                    try { var res = PaintRequest(car, layer, pr); if (res != null) { body += ", " + res; Plugin.L.LogInfo("Onarım: " + res); } }
+                    catch (Exception e) { failed.Add(e.Message); }
+                }
             bool wash = false;
             if (scen.extraIssues != null) foreach (var i in scen.extraIssues) wash |= i != null && i.affectedPart == CarPartNames.CarWash;
             if (scen.serviceRequests != null)
@@ -1657,7 +1722,7 @@ static class Core
             if (targets.Count == 0) Lbl("   <color=#9aa0a6>Parça değişimi gerektiren arıza yok</color>");
             for (int i = 0; i < targets.Count; i++)
             {
-                var (ctrl, pn, issue, change, _) = targets[i];
+                var (ctrl, pn, issue, change, _, _) = targets[i];
                 H();
                 cx += 14;
                 bool on = sel.Contains(i);
@@ -1668,7 +1733,7 @@ static class Core
                 EH();
             }
             bool hasBody = false;
-            try { hasBody = sc.rustyParts != BodyPartTypes.None; } catch { }
+            try { hasBody = sc.rustyParts != BodyPartTypes.None || (sc.serviceRequests != null && sc.serviceRequests.ToArray().Any(r => r?.TryCast<ScriptablePaintBodyPartServiceRequest>() != null)); } catch { }
             H();
             cx += 14;
             if (hasBody) { bool b = sel.Contains(BodyIdx); if (Tgl(b, "Kaporta (pas/boya/yıkama)") != b) { if (b) sel.Remove(BodyIdx); else sel.Add(BodyIdx); } }
