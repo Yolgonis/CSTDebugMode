@@ -1234,6 +1234,8 @@ static class Core
         return res;
     }
 
+    static string B(Func<bool> f) { try { return f() ? "T" : "f"; } catch { return "?"; } }
+
     // null = canlı liste okunamadı
     static List<int> LiveBrokenFuses(CarPartNodeControllerFuse fc, CarPartNames pn)
     {
@@ -1383,7 +1385,6 @@ static class Core
             try { return $"hash={InventoryItemExtensions.GetHashSafe(it)} dur={InventoryItemExtensions.GetNormalizedDurability(it):0.###} owner='{it.ItemOwner?.ToString()}' sbi={it.sessionBasedIndex} type={it.ItemType}"; }
             catch (Exception e) { return "? " + e.Message; }
         }
-        string B(Func<bool> f) { try { return f() ? "T" : "f"; } catch { return "?"; } }
         Plugin.L.LogInfo($"── DÖKÜM {CarLabel(car)} (#{car.NetworkObjectId}) • müşteri arandı={B(() => car.GetIsCustomerCalled)} • kurallar={string.Join(",", RulesOf(scen))}");
         if (scen.serviceRequests != null)
             foreach (var r in scen.serviceRequests)
@@ -1516,13 +1517,25 @@ static class Core
                     if (fc.Count == 0) { failed.Add($"{pn} (uygun sigorta yok)"); continue; }
                     try
                     {
-                        InstallSlot(ctrl, pn, fc[0], slot, slotItem);
-                        // oyun normalde sigorta değişince bunu kendisi çağırır; liste hâlâ yanık diyorsa bir kez tetikle
-                        if (LiveBrokenFuses(fctrl, pn)?.Contains(fuseIdx) == true)
+                        // Düz takas oyunun yanık listesini temizlemiyor (log: "oyun hâlâ yanık diyor").
+                        // Oyuncu gibi yap: önce sök (yuva boş), sonra yenisini tak. Hangi adımın tuttuğunu logla.
+                        bool Broken() => LiveBrokenFuses(fctrl, pn)?.Contains(fuseIdx) == true;
+                        string how = "takas";
+                        ctrl.InitializeWithDataAndIndex(slot, slotItem, true);          // son sökülen = yanık
+                        ctrl.InitializeWithDataAndIndex(slot, InventoryItem.empty, false);  // yuva boş
+                        InstallSlot(ctrl, pn, fc[0], slot, InventoryItem.empty);           // yeni sigorta
+                        try { Inv?.AddCarPartItemWithCarPartName(pn, slotItem, OwnerName()); } catch { }
+                        if (Broken()) { how = "sök+tak+CarPartItemChanged"; try { fp.CarPartItemChanged(slotItem, fp.carPartItem.Value); } catch { } }
+                        if (Broken()) { how = "sök+tak+On*FuseChanged"; try { if (pn == CarPartNames.FuseSmall) fctrl.OnSmallFuseChanged(fuseIdx); else if (pn == CarPartNames.FuseMid) fctrl.OnMidFuseChanged(fuseIdx); else fctrl.OnFuseChanged(fuseIdx); } catch { } }
+                        if (Broken())
                         {
-                            try { if (pn == CarPartNames.FuseSmall) fctrl.OnSmallFuseChanged(fuseIdx); else if (pn == CarPartNames.FuseMid) fctrl.OnMidFuseChanged(fuseIdx); else fctrl.OnFuseChanged(fuseIdx); } catch { }
+                            // son çare: oyunun ağ listesinden çıkar (NetworkList<int>, host'ta yazılır, herkese gider)
+                            how = "listeden çıkarıldı";
+                            try { var pr = fctrl.fuseboxProcess; var nl = pn == CarPartNames.FuseSmall ? pr.BrokenSmallFuseIndexes : pn == CarPartNames.FuseMid ? pr.BrokenMidFuseIndexes : pr.BrokenLargeFuseIndexes; nl.Remove(fuseIdx); } catch (Exception e) { how += " HATA " + e.Message; }
                         }
-                        bool still = LiveBrokenFuses(fctrl, pn)?.Contains(fuseIdx) == true;
+                        else if (how == "takas") how = "sök+tak";
+                        bool still = Broken();
+                        Plugin.L.LogInfo($"   sigorta #{fuseIdx}: {how}; need={B(() => fp.GetNeededRepair())} rep={B(() => fp.GetRepaired())}");
                         fixedN++;
                         Plugin.L.LogInfo($"Onarım: {pn} sigorta #{fuseIdx} (yuva {slot}) ← {fc[0].GetName} [{fc[0].GetIdentical}]{(still ? " — oyun hâlâ yanık diyor!" : "")} [{issue}]");
                     }
