@@ -1131,8 +1131,12 @@ static class Core
                     foreach (var issue in req.carIssues) AddIssue(issue, change, req);
                 }
         bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
-        bool noExtras = RulesOf(scen).Contains(ServiceRequestCustomerRules.NoExtraFixes);   // müşteri ek tamir istemiyor → bedel yazılır
-        if (repairExtras && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, !(issue?.name ?? "").Contains("Charge", StringComparison.OrdinalIgnoreCase), null);   // isteği olmayan ek arıza: "Charge…" şarj, gerisi değişim
+        // Müşteri kuralı: "Ekstra tamirat kabul" → ek arızalar da otomatik onarılır (ücreti müşteri öder);
+        // "Ekstra tamirat yok" → asla; kural yoksa yalnızca ayar açıkken.
+        var rules = RulesOf(scen);
+        bool noExtras = rules.Contains(ServiceRequestCustomerRules.NoExtraFixes);
+        bool extrasOk = rules.Contains(ServiceRequestCustomerRules.ExtraFixesAllowed);
+        if ((extrasOk || repairExtras) && !noExtras && scen.extraIssues != null) foreach (var issue in scen.extraIssues) AddIssue(issue, !(issue?.name ?? "").Contains("Charge", StringComparison.OrdinalIgnoreCase), null);   // isteği olmayan ek arıza: "Charge…" şarj, gerisi değişim
         return res;
     }
 
@@ -2089,6 +2093,8 @@ static class Core
             if (Pill(Next(26, LineH), open ? "-" : "+", open)) { if (open) carOpen.Remove(id); else carOpen.Add(id); }
             Lbl($"<b>{CarLabel(car)}</b>", 260);
             Lbl($"<color={(rd == rt && rt > 0 ? "#5fd068" : "#ff8c1f")}>{rd}/{rt} istek</color>", 80);
+            var cr = RulesOf(car.CarServiceScenario);
+            Lbl(cr.Contains(ServiceRequestCustomerRules.ExtraFixesAllowed) ? "<color=#5fd068>ekstra kabul</color>" : cr.Contains(ServiceRequestCustomerRules.NoExtraFixes) ? "<color=#9aa0a6>ekstra yok</color>" : "", 90);
             Lbl(me != null ? $"<color=#9aa0a6>{Vector3.Distance(me.transform.position, car.transform.position):0} m</color>" : "", 50);
             if (Btn("Git", 40)) Teleport(car.transform.position + car.transform.right * 2.5f + Vector3.up);
             if (carView == 2) { if (Btn("Teslim et", 80)) Game("deliver", id.ToString()); }
@@ -2140,7 +2146,7 @@ static class Core
         }
         if (!any) Lbl("<color=#9aa0a6>Bu grupta araç yok.</color>");
         Space(6);
-        repairExtras = Tgl(repairExtras, "Müşterinin istemediği ek arızaları da onar (teslimde Extra part Cost yazılır — normalde kapalı bırak)");
+        repairExtras = Tgl(repairExtras, "Kuralı belirtilmemiş müşterilerde de ek arızaları onar (ekstra kabul edenlerde zaten otomatik, kabul etmeyenlerde asla)");
     }
 
     static void DrawBuildings()
