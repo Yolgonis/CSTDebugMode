@@ -1142,6 +1142,35 @@ static class Core
 
     static int nextSbi = 900000 + new System.Random().Next(50000);
 
+    // Parça zaten doğru ama oyunun değişim izi eksikse (eski sürümün bıraktığı durum) izi tamamlar.
+    // Yeni gelen araçta last = aynı modelin bozuk kopyası (farklı sbi); tamir sonrası last = eski bozuk parça.
+    static bool FixTrace(CarPartNodeController ctrl)
+    {
+        var p = ctrl.GetPrimaryCarPart();
+        bool changed = false;
+        try { if (!p.isInstalled.Value) { p.isInstalled.Value = true; changed = true; } } catch { }
+        try
+        {
+            var cur = p.carPartItem.Value;
+            if (cur.sessionBasedIndex == 0) { cur.sessionBasedIndex = nextSbi++; p.carPartItem.Value = cur; changed = true; }
+            var last = p.lastRemovedCarPartItem.Value;
+            bool lastIsCur = last == null || last.ItemType == CarPartNames.NotImportant
+                || (InventoryItemExtensions.GetHashSafe(last) == InventoryItemExtensions.GetHashSafe(cur)
+                    && InventoryItemExtensions.GetNormalizedDurability(last) >= 0.999f);
+            if (lastIsCur)
+            {
+                var broken = p.carPartItem.Value;   // .Value her seferinde ayrı kopya döndürür
+                InventoryItemExtensions.SetDurability(ref broken, ScriptableCarPartItemBase.MaxDurability * 0.1f);
+                broken.sessionBasedIndex = nextSbi++;
+                try { broken.ItemOwner = ""; } catch { }
+                p.lastRemovedCarPartItem.Value = broken;
+                changed = true;
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning("FixTrace: " + e.Message); }
+        return changed;
+    }
+
     static string OwnerName()
     {
         try { return Steamworks.SteamFriends.GetPersonaName(); } catch { return "Player"; }
@@ -1206,7 +1235,12 @@ static class Core
             var cands = Candidates(ctrl, pn);
             if (cands.Count == 0) { failed.Add($"{pn} (uygun eşya yok)"); continue; }
             var best = cands[0];
-            if (CurrentHash(ctrl) == itemHash[best.Pointer] && Mathf.Approximately(InventoryItemExtensions.GetNormalizedDurability(CurrentItem(ctrl)), 1f)) { already++; continue; }
+            if (CurrentHash(ctrl) == itemHash[best.Pointer] && Mathf.Approximately(InventoryItemExtensions.GetNormalizedDurability(CurrentItem(ctrl)), 1f))
+            {
+                if (FixTrace(ctrl)) { fixedN++; Plugin.L.LogInfo($"Onarım: {pn} değişim izi düzeltildi [{issue}]"); }
+                else already++;
+                continue;
+            }
             try
             {
                 Install(ctrl, pn, best, PartCount(ctrl));
