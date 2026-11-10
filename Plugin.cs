@@ -39,11 +39,21 @@ public class Plugin : BasePlugin
         // Debug ile değiştirilmiş oturum herkese açık sıralamayı kirletmesin.
         h.Patch(HarmonyLib.AccessTools.Method(typeof(Steamworks.SteamUserStats), "UploadLeaderboardScore"),
             prefix: new HarmonyLib.HarmonyMethod(typeof(Plugin), nameof(SkipUpload)));
+        // "Basılı tutma yok": parça sökme/takma süreleri (salt okunur özellikler) ayar açıkken kısaltılır.
+        foreach (var t in new[] { typeof(CarPart), typeof(CarPartSequenced) })
+            foreach (var n in new[] { "processTimeInstall", "processTimeUninstall", "playerProcessTimeInstall", "playerProcessTimeUninstall" })
+            {
+                var m = HarmonyLib.AccessTools.PropertyGetter(t, n);
+                if (m == null || m.DeclaringType != t) continue;
+                try { h.Patch(m, postfix: new HarmonyLib.HarmonyMethod(typeof(Plugin), nameof(TapTime))); }
+                catch (Exception e) { L.LogWarning($"Süre yaması {t.Name}.{n}: {e.Message}"); }
+            }
         Core.BindConfig(Config);
         AddComponent<DebugBehaviour>();
         L.LogInfo("CST Debug Mode yüklendi — F8 menü, F10 uçma");
     }
 
+    static void TapTime(ref float __result) { if (Core.NoHold) __result = 0.01f; }
     static bool SkipQuit() { L.LogWarning("FileIntegrityChecker.Quit engellendi (mod yüklü)"); return false; }
     static bool SkipUpload() { L.LogWarning("Leaderboard skor gönderimi engellendi (debug mod açık)"); return false; }
 }
@@ -141,7 +151,8 @@ static class Core
     {
         if (!inited) Init();
         smoothDt = Mathf.Lerp(smoothDt, Time.unscaledDeltaTime, 0.05f);
-        if (pendingDeliver.Count > 0) PumpDeliveries();
+        if (deliverStack.Count > 0) StepDelivery();   // bir teslim bitmeden sıradaki başlamaz
+        else if (pendingDeliver.Count > 0) PumpDeliveries();
         var kb = Keyboard.current;
         if (kb != null)
         {
@@ -149,10 +160,11 @@ static class Core
             if (kb.f10Key.wasPressedThisFrame) SetFly(!fly);
         }
         EnsureMessaging();
+        if ((autoLogTimer -= Time.unscaledDeltaTime) <= 0f) { autoLogTimer = 2f; if (Online) AutoLog(); if (noHoldCfg.Value) ApplyNoHold(); }
         if (!menu) return;
         BlockGameInput();
         targets.RemoveAll(t => t.C == null);   // OnGUI'de silmek IMGUI kontrol sayısını bozar
-        if ((snapTimer -= Time.unscaledDeltaTime) <= 0f) { snapTimer = 0.5f; Snapshot(); RefreshValues(); if (tab == 0 || tab == 3) RefreshWorld(); }
+        if ((snapTimer -= Time.unscaledDeltaTime) <= 0f) { snapTimer = 0.5f; if (tab == 6) Snapshot(); RefreshValues(); if (tab == 0 || tab == 3) RefreshWorld(); }
         Raycast();
     }
 
@@ -187,7 +199,6 @@ static class Core
 
     // Menü açıkken oyunun bütün InputAction'ları kapalı: yürüme/bakış, etkileşim tuşları, arkadaki oyun butonları.
     // F8/F10 klavye cihazından doğrudan okunduğu için etkilenmez; IMGUI olayları da action'lardan bağımsız.
-    static bool inputLocked;
     static readonly List<UnityEngine.InputSystem.InputAction> disabledActions = new();
 
     static void BlockGameInput()   // her karede: oyun bir action'ı yeniden açarsa tekrar kapat
@@ -215,9 +226,8 @@ static class Core
     static void SetPlayerInput(bool active)
     {
         var sp = LocalPlayer()?.GetComponentInChildren<SinglePlayer>(true);
-        if (sp == null) { inputLocked = false; return; }
+        if (sp == null) return;
         sp.SetMovementInputActive(active, !active);
-        inputLocked = !active;
     }
 
     static void OnLog(string cond, string stack, LogType type)
@@ -242,6 +252,8 @@ static class Core
             new Action<ulong, FastBufferReader>(OnMsg));
         cmm.RegisterNamedMessageHandler(MsgName, msgHandler);
         registeredCmm = cmm;
+        // yeni oturum: ağ numaraları baştan başlar, eski oturumun kayıtları ve istemci izni geçersiz
+        delivered.Clear(); pendingDeliver.Clear(); deliverStack.Clear(); repairOff.Clear(); carOpen.Clear(); carLogged.Clear(); allowClients = false;
         hostMod = NM.IsServer ? "-" : "yanıt bekleniyor (host'ta mod yoksa yanıt gelmez)";
         if (!NM.IsServer) Send(NetworkManager.ServerClientId, "ping");
     }
@@ -653,6 +665,7 @@ static class Core
     {
         hudCfg = cfg.Bind("Menu", "HUD", false, "Sağ üstte FPS/ping/konum paneli (menüden açılıp kapatılır)");
         hud = hudCfg.Value;
+        noHoldCfg = cfg.Bind("Oyun", "NoHold", false, "Basılı tutma gerektiren işlemler tek tıkla yapılır (menüden açılıp kapatılır)");
         winCfg = cfg.Bind("Menu", "Window", "16,50,700,900", "Menü konumu ve boyutu: x,y,genişlik,yükseklik (1080p ölçeğinde)");
         var p = winCfg.Value.Split(',');
         if (p.Length == 4 && p.All(x => float.TryParse(x, NumberStyles.Float, CultureInfo.InvariantCulture, out _)))
@@ -926,6 +939,7 @@ static class Core
         if (items is { Count: > 0 }) return items;
         items = new List<ScriptableCarPartItemBase>();
         itemHash.Clear();
+        byHash.Clear();
         var all = ScriptableCarPartItemBase.All;
         if (all != null)
             foreach (var key in all.Keys)   // anahtar = InventoryItem.partHashes'e yazılan eşya hash'i
@@ -934,6 +948,7 @@ static class Core
                 if (v == null) continue;
                 items.Add(v);
                 itemHash[v.Pointer] = key;
+                byHash[key] = v;
             }
         items.Sort((a, b) => string.Compare(a.GetName, b.GetName, StringComparison.CurrentCultureIgnoreCase));
         return items;
@@ -1028,8 +1043,9 @@ static class Core
     static readonly List<Car> cars = new();
     static readonly List<ABuildingSlot> slots2 = new();
     static readonly HashSet<ulong> carOpen = new();
-    // shortcut: seçim IssueTargets sırasına göre indeks; host ve istemcide "ek arızalar" seçeneği farklıysa sıra kayabilir
-    static readonly Dictionary<ulong, HashSet<int>> repairSel = new();
+    // İşareti kaldırılan onarım noktaları (nokta işaretçisi; IntPtr.Zero = kaporta). Satır numarası değil: liste kısalınca kaymasın.
+    // shortcut: host'a yine IssueTargets sırasındaki indeks gider; host ve istemcide "ek arızalar" seçeneği farklıysa sıra kayabilir
+    static readonly Dictionary<ulong, HashSet<IntPtr>> repairOff = new();
 
     static void RefreshWorld()
     {
@@ -1053,6 +1069,18 @@ static class Core
     }
 
     static readonly Dictionary<IntPtr, int> itemHash = new();
+    static readonly Dictionary<int, ScriptableCarPartItemBase> byHash = new();   // eşya hash'i → tanım
+    static ScriptableCarPartItemBase DefOf(int hash) { Items(); return byHash.TryGetValue(hash, out var d) ? d : null; }
+
+    // Müşterinin parça kuralları (orijinal / yan sanayi / sökülenle aynı). Boş dönerse hiçbir eşya uymuyor.
+    static List<ScriptableCarPartItemBase> ByRules(IEnumerable<ScriptableCarPartItemBase> f, int oldHash)
+    {
+        bool Orig(ScriptableCarPartItemBase i) { try { return i.brandData != null && i.brandData.GetIsOriginal; } catch { return false; } }
+        if (curRules.Contains(ServiceRequestCustomerRules.OriginalOnly)) f = f.Where(Orig);
+        if (curRules.Contains(ServiceRequestCustomerRules.AftermarketOnly)) f = f.Where(i => !Orig(i));
+        if (curRules.Contains(ServiceRequestCustomerRules.SameAsRemovedPart) && oldHash != 0) f = f.Where(i => itemHash[i.Pointer] == oldHash);
+        return f.ToList();
+    }
 
     static int PartCount(CarPartNodeController ctrl)
     {
@@ -1130,7 +1158,6 @@ static class Core
                     try { change = req.NeedChangeCarPart(); } catch { }   // şarj/dolum isteklerinde parça değiştirmek "yanlış işlem"
                     foreach (var issue in req.carIssues) AddIssue(issue, change, req);
                 }
-        bool called = false; try { called = car.GetIsCustomerCalled; } catch { }
         // Müşteri kuralı: "Ekstra tamirat kabul" → ek arızalar da otomatik onarılır (ücreti müşteri öder);
         // "Ekstra tamirat yok" → asla; kural yoksa yalnızca ayar açıkken.
         var rules = RulesOf(scen);
@@ -1181,8 +1208,7 @@ static class Core
         if (it == null) return "boş";
         int h; float d;
         try { h = InventoryItemExtensions.GetHashSafe(it); d = InventoryItemExtensions.GetNormalizedDurability(it); } catch { return "?"; }
-        Items();
-        var item = items.FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var x) && x == h);
+        var item = DefOf(h);
         return $"{(item != null ? item.GetName : (h == 0 ? "boş" : "#" + h))}  %{d * 100:0}";
     }
 
@@ -1196,17 +1222,12 @@ static class Core
             .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
         if (curRules != null)
         {
-            bool Orig(ScriptableCarPartItemBase i) { try { return i.brandData != null && i.brandData.GetIsOriginal; } catch { return false; } }
-            IEnumerable<ScriptableCarPartItemBase> f = list;
-            if (curRules.Contains(ServiceRequestCustomerRules.OriginalOnly)) f = f.Where(Orig);
-            if (curRules.Contains(ServiceRequestCustomerRules.AftermarketOnly)) f = f.Where(i => !Orig(i));
-            if (curRules.Contains(ServiceRequestCustomerRules.SameAsRemovedPart) && oldHash != 0) f = f.Where(i => itemHash[i.Pointer] == oldHash);
-            var fl = f.ToList();
+            var fl = ByRules(list, oldHash);
             if (fl.Count > 0) list = fl;
             else Plugin.L.LogWarning($"{pn}: müşteri kuralına ({string.Join(",", curRules)}) uyan eşya bulunamadı, kural dışı seçildi");
         }
         // Eski parçayla aynı uyumluluk + aynı özellik (ör. 70A akü, 15A sigorta) olanlar öncelikli; sigortada röle≠sigorta
-        var oldDef = oldHash == 0 ? null : list.Concat(Items()).FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var h) && h == oldHash);
+        var oldDef = oldHash == 0 ? null : DefOf(oldHash);
         if (oldDef != null)
         {
             string spec(ScriptableCarPartItemBase i) { try { return i.GetIdentical ?? ""; } catch { return ""; } }
@@ -1279,7 +1300,7 @@ static class Core
             {
                 int h; try { h = InventoryItemExtensions.GetHashSafe(it, i); } catch { break; }
                 if (h == 0 || h == -1) break;
-                var d = Items().FirstOrDefault(x => itemHash.TryGetValue(x.Pointer, out var v) && v == h);
+                var d = DefOf(h);
                 string extra = "";
                 try { var rm = d?.TryCast<ScriptableCarPartRim>(); if (rm != null) extra = $" rimType={rm.GetRimType}"; var tr = d?.TryCast<ScriptableCarPartTire>(); if (tr != null) extra = $" tireType={tr.tireType}"; } catch { }
                 Plugin.L.LogInfo($"      teker {lbl}[{i}]: {(d == null ? "#" + h : $"{d.GetName} ({d.GetIl2CppType().Name}) {d.rarity} compat={d.compatibilityId} [{d.GetIdentical}]{extra}")}");
@@ -1387,7 +1408,7 @@ static class Core
     }
 
     // Çok yuvalı noktalar (sigorta kutusu vb.): bütün noktayı başlatmak tutmazsa en düşük dayanıklı yuvayı tek değiştir.
-    static (int Slot, InventoryItem Item, float Dur) WorstSlot(CarPartNodeController ctrl, CarPartNames? type = null)
+    static (int Slot, InventoryItem Item, float Dur) WorstSlot(CarPartNodeController ctrl)
     {
         int n = PartCount(ctrl), worst = -1;
         float worstDur = 2f;
@@ -1398,7 +1419,6 @@ static class Core
             {
                 var it = ctrl.GetCarPartByIndex(i).carPartItem.Value;
                 if (!ValidItem(it)) continue;
-                if (type.HasValue && it.ItemType != type.Value) continue;   // sigorta kutusunda röle/diğer boy yuvaları atla
                 float d = InventoryItemExtensions.GetNormalizedDurability(it);
                 if (d < worstDur) { worstDur = d; worst = i; worstItem = it; }
             }
@@ -1433,10 +1453,8 @@ static class Core
         if (hashes.Count == 0) return null;
         float dur = 1f;
         try { dur = InventoryItemExtensions.GetNormalizedDurability(old); } catch { }
-        Items();
-        ScriptableCarPartItemBase Def(int h) => items.FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var x) && x == h);
         string cls = rim ? "ScriptableCarPartRim" : "ScriptableCarPartTire", what = rim ? "jantı" : "lastiği";
-        int idx = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == cls);
+        int idx = hashes.FindIndex(h => DefOf(h)?.GetIl2CppType().Name == cls);
 
         if (!change || idx < 0)
         {
@@ -1445,7 +1463,7 @@ static class Core
             return $"Wheel dayanıklılığı dolduruldu (%{dur * 100:0} → %100)";
         }
 
-        var oldPart = Def(hashes[idx]);
+        var oldPart = DefOf(hashes[idx]);
         bool Kind(ScriptableCarPartItemBase i) => i.GetIl2CppType().Name == cls && itemHash.ContainsKey(i.Pointer);
         var pool = Items().Where(i => Kind(i) && (oldPart == null || i.compatibilityId == oldPart.compatibilityId)).ToList();   // aynı ölçü
         if (need != null)
@@ -1464,12 +1482,7 @@ static class Core
         }
         if (curRules != null)
         {
-            bool Orig(ScriptableCarPartItemBase i) { try { return i.brandData != null && i.brandData.GetIsOriginal; } catch { return false; } }
-            IEnumerable<ScriptableCarPartItemBase> f = pool;
-            if (curRules.Contains(ServiceRequestCustomerRules.OriginalOnly)) f = f.Where(Orig);
-            if (curRules.Contains(ServiceRequestCustomerRules.AftermarketOnly)) f = f.Where(i => !Orig(i));
-            if (curRules.Contains(ServiceRequestCustomerRules.SameAsRemovedPart)) f = f.Where(i => itemHash[i.Pointer] == hashes[idx]);
-            var fl = f.ToList();
+            var fl = ByRules(pool, hashes[idx]);
             if (fl.Count > 0) pool = fl;
         }
         var best = pool.OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).FirstOrDefault();
@@ -1482,7 +1495,7 @@ static class Core
         if (rim && oldPart != null && Math.Abs(best.identicalValue - oldPart.identicalValue) > 0.01f)
         {
             // jant ölçüsü değişti → lastik de aynı ölçüde olmalı
-            int ti = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
+            int ti = hashes.FindIndex(h => DefOf(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
             var tire = Items().Where(i => i.GetIl2CppType().Name == "ScriptableCarPartTire" && itemHash.ContainsKey(i.Pointer) && Math.Abs(i.identicalValue - best.identicalValue) < 0.01f)
                 .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).FirstOrDefault();
             if (ti >= 0 && tire != null) { newHashes[ti] = itemHash[tire.Pointer]; tireNote = $", lastik ← {tire.GetName} ({best.identicalValue:0} inç)"; }
@@ -1536,6 +1549,70 @@ static class Core
         try { return Steamworks.SteamFriends.GetPersonaName(); } catch { return "Player"; }
     }
 
+    static string AcceptHints(Car car) =>
+        $"parçaEtkileşim={B(() => car.GetCanInteractWithParts)} etkileşilebilir={B(() => car.GetIsInteractable)} hareket={B(() => car.CanCarMove)} npc={B(() => car.GetNpc != null)} "
+        + $"kabulAlanında={B(() => CarServiceManager.instance.customerAcceptAreas.ToArray().Any(a => a != null && a.CheckAnyCar()?.Pointer == car.Pointer))} "
+        + $"currentCars={B(() => CarServiceManager.instance.GetCurrentCars().ToArray().Any(c => c != null && c.Pointer == car.Pointer))} teslimGünü={car.GetExpectedDeliveryDay}";
+
+    // ── basılı tutma yok ──
+    // Oyunun basılı tutma süreleri (el: PlayerHand, arayüz düğmeleri) çok küçük bir değere çekilir; kapatınca eski değerler geri yazılır.
+    // Açıkken 2 sn'de bir uygulanır: oyuncu ve menüler sonradan oluşuyor. Duraklatma menüsündeki "çıkmak için basılı tut" bilerek dışarıda.
+    static BepInEx.Configuration.ConfigEntry<bool> noHoldCfg;
+    internal static bool NoHold => noHoldCfg != null && noHoldCfg.Value;
+    static readonly Dictionary<IntPtr, float[]> holdOrig = new();
+    const float Tap = 0.01f;
+
+    static IEnumerable<T> All<T>() where T : UnityEngine.Object
+    {
+        foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<T>(), FindObjectsInactive.Include, FindObjectsSortMode.None)) { var t = o.TryCast<T>(); if (t != null) yield return t; }
+    }
+
+    static void ApplyNoHold()
+    {
+        bool on = noHoldCfg.Value;
+        float[] Orig(IntPtr p, params float[] cur)   // ilk görüşte asıl süreleri sakla; kapalıyken saklanmamış nesneye dokunma
+        {
+            if (holdOrig.TryGetValue(p, out var o)) return o;
+            if (!on) return null;
+            return holdOrig[p] = cur;
+        }
+        // Parça sökme/takma süreleri salt okunur özellik: Plugin.Load'daki Harmony yaması (TapTime) NoHold açıkken kısaltır.
+        foreach (var b in All<CommonButtonComponent>()) { var o = Orig(b.Pointer, b.holdFillTime); if (o != null) b.holdFillTime = on ? Tap : o[0]; }
+        foreach (var b in All<HoldableGenericListButton>()) { var o = Orig(b.Pointer, b._holdTime, b.defaultHoldTime); if (o != null) { b._holdTime = on ? Tap : o[0]; b.defaultHoldTime = on ? Tap : o[1]; } }
+        foreach (var b in All<Game.UI.AppraisalReportCallButton>()) { var o = Orig(b.Pointer, b._holdTime, b.defaultHoldTime); if (o != null) { b._holdTime = on ? Tap : o[0]; b.defaultHoldTime = on ? Tap : o[1]; } }
+        if (!on) holdOrig.Clear();
+    }
+
+    // Otomatik log: 2 sn'de bir her aracın durumu okunur, değişince tek satır yazılır (menü kapalıyken de; Döküm'e basmak gerekmez).
+    static readonly Dictionary<ulong, string> carLogged = new();
+    static float autoLogTimer;
+    static long lastMoney;
+
+    static void AutoLog()
+    {
+        var alive = new HashSet<ulong>();
+        foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<Car>(), FindObjectsSortMode.None))
+        {
+            var c = o.TryCast<Car>();
+            if (c == null) continue;
+            alive.Add(c.NetworkObjectId);
+            var (d, t) = ReqCount(c);
+            var s = $"aşama={StageOf(c)} arandı={B(() => c.GetIsCustomerCalled)} istek={d}/{t} {AcceptHints(c)}";
+            if (carLogged.TryGetValue(c.NetworkObjectId, out var old) && old == s) continue;
+            carLogged[c.NetworkObjectId] = s;
+            Plugin.L.LogInfo($"[oto] {CarLabel(c)} #{c.NetworkObjectId}: {s}");
+        }
+        // Oyun, giden aracın ağ numarasını yeni araca veriyor (logda #4 görüldü): giden araçların kayıtlarını bırak
+        delivered.IntersectWith(alive);
+        foreach (var id in carLogged.Keys.Where(k => !alive.Contains(k)).ToList())
+        {
+            Plugin.L.LogInfo($"[oto] araç #{id} sahneden ayrıldı (para: {Inv?.GetMoney})");
+            carLogged.Remove(id); repairOff.Remove(id); carOpen.Remove(id);
+        }
+        long money = Inv != null ? Inv.GetMoney : lastMoney;
+        if (money != lastMoney) { Plugin.L.LogInfo($"[oto] para: {lastMoney} → {money} ({money - lastMoney:+#;-#})"); lastMoney = money; }
+    }
+
     // Arızalı noktaların oyunun tuttuğu bütün izlerini log'a yazar: elle değişim ile Onar'ı karşılaştırmak için.
     static string DumpCar(Car car)
     {
@@ -1548,6 +1625,8 @@ static class Core
             catch (Exception e) { return "? " + e.Message; }
         }
         Plugin.L.LogInfo($"── DÖKÜM {CarLabel(car)} (#{car.NetworkObjectId}) • müşteri arandı={B(() => car.GetIsCustomerCalled)} • kurallar={string.Join(",", RulesOf(scen))}");
+        // "Kabul edildi" için oyunda doğrudan bayrak yok; hangi ipucunun doğru olduğunu görmek için hepsi yazılır
+        Plugin.L.LogInfo("   kabul ipuçları: " + AcceptHints(car));
         if (scen.serviceRequests != null)
             foreach (var r in scen.serviceRequests)
             {
@@ -1585,7 +1664,7 @@ static class Core
                     {
                         var it = ctrl.GetCarPartByIndex(si).carPartItem.Value;
                         int hh = InventoryItemExtensions.GetHashSafe(it);
-                        var def = Items().FirstOrDefault(x => itemHash.TryGetValue(x.Pointer, out var v) && v == hh);
+                        var def = DefOf(hh);
                         var fz = ctrl.GetCarPartByIndex(si).TryCast<CarPartFuse>();
                         string fs = fz == null ? "" : $" #{fz.Index} need={(fz.GetNeededRepair() ? "T" : "f")} rep={(fz.GetRepaired() ? "T" : "f")}";
                         Plugin.L.LogInfo($"      yuva {si}{fs}: {it.ItemType} {(def != null ? def.GetName + " [" + def.GetIdentical + "]" : "#" + hh)} dur={InventoryItemExtensions.GetNormalizedDurability(it):0.###}");
@@ -1687,9 +1766,8 @@ static class Core
                         // Düz takas yeterli: oyunun yanık listesi bir sonraki karelerde güncellenir (473 KA 67'de %100 oldu).
                         // Listeden elle silmek Validate'i bozuyor (%0) → yapma.
                         InstallSlot(ctrl, pn, fc[0], slot, slotItem);
-                        bool still = false;
                         fixedN++;
-                        Plugin.L.LogInfo($"Onarım: {pn} sigorta #{fuseIdx} (yuva {slot}) ← {fc[0].GetName} [{fc[0].GetIdentical}]{(still ? " — oyun hâlâ yanık diyor!" : "")} [{issue}]");
+                        Plugin.L.LogInfo($"Onarım: {pn} sigorta #{fuseIdx} (yuva {slot}) ← {fc[0].GetName} [{fc[0].GetIdentical}] [{issue}]");
                     }
                     catch (Exception e) { failed.Add($"{pn} ({e.Message})"); }
                 }
@@ -1781,15 +1859,11 @@ static class Core
         if (inArea && !Spawned(area)) inArea = false;   // ağda olmayan şablon alan: oyunun teslimi orada hata verip yarım kalıyor
         if (!inArea || area == null)
         {
-            // Alanın dışındaki araçla teslim akışı yarıda kalıyor (ücret gelir, araç gitmez) → önce alana koy, sonra teslim
-            if (pendingDeliver.Count > 0) return "önceki teslim bitmeden yenisi olmaz (alan tek)";
-            area = FreeArea(csm);
-            if (area == null) return "boş (aktif) teslim alanı yok";
-            var (pos, rot) = AreaPose(area);
-            MoveCar(car, pos, rot);
-            try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { }
-            pendingDeliver.Add((car, Time.time + 1.5f, 0));
-            return "araç teslim alanına konuldu, birazdan teslim edilecek";
+            // Alanın dışındaki araçla teslim akışı yarıda kalıyor (ücret gelir, araç gitmez) → önce alana koy, sonra teslim.
+            // Alan tek olabilir: araçlar sıraya girer, PumpDeliveries alan boşaldıkça birer birer taşıyıp teslim eder.
+            if (pendingDeliver.Any(p => p.Car != null && p.Car.Pointer == car.Pointer)) return "zaten teslim sırasında";
+            pendingDeliver.Add((car, 0f, 0, 0f));
+            return pendingDeliver.Count > 1 ? $"teslim sırasına alındı ({pendingDeliver.Count}. sırada)" : "teslim alanına konuluyor, birazdan teslim edilecek";
         }
         StartDeliver(csm, car, area);
         return "teslim başlatıldı";
@@ -1803,11 +1877,13 @@ static class Core
     // Oyunun "boş alan"ı bazen ağda olmayan şablonu döndürüyor (log: ArgumentException NetworkObjectReference) → yalnızca spawn edilmiş, boş alan
     static CustomerCarDeliveryArea FreeArea(CarServiceManager csm)
     {
-        try { var a = csm.GetEmptyCustomerCarDeliveryArea(); if (Spawned(a)) return a; } catch { }
+        // collider kapalı alanın bounds'u (0,0,0) döner → araç haritanın ortasına gider; yalnızca collider'ı açık alan
+        bool Usable(CustomerCarDeliveryArea a) { try { return Spawned(a) && a.boxCollider != null && a.boxCollider.enabled; } catch { return false; } }
+        try { var a = csm.GetEmptyCustomerCarDeliveryArea(); if (Usable(a) && a.CheckAnyCar() == null) return a; } catch { }
         foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<CustomerCarDeliveryArea>(), FindObjectsSortMode.None))
         {
             var a = o.TryCast<CustomerCarDeliveryArea>();
-            if (!Spawned(a)) continue;
+            if (!Usable(a)) continue;
             Car c = null; try { c = a.CheckAnyCar(); } catch { }
             if (c == null) return a;
         }
@@ -1841,41 +1917,95 @@ static class Core
     }
 
     static readonly HashSet<ulong> delivered = new();
-    static readonly List<(Car Car, float T, int Try)> pendingDeliver = new();
+    // Teslim sırası (baştaki işlenir). T: sonraki deneme zamanı, Try: alana taşıma sayısı, Until: vazgeçme zamanı (0 = sırası gelmedi)
+    static readonly List<(Car Car, float T, int Try, float Until)> pendingDeliver = new();
 
     static void StartDeliver(CarServiceManager csm, Car car, CustomerCarDeliveryArea area)
     {
         delivered.Add(car.NetworkObjectId);
-        csm.StartDeliverCarCoroutine(car, area);
-        Plugin.L.LogInfo($"Teslim: {CarLabel(car)} → {area.name}");
+        // Oyunun teslim akışı müşterinin randevu saatini bekliyor (DeliverCarCoroutine: saat >= slotAbsMinutes olana dek).
+        // Randevuyu "şimdi" yap ki Teslim et'e basınca araç hemen verilsin.
+        string slot = "?";
+        try
+        {
+            var st = car.CarStats; var clk = Clock;
+            int now = (int)clk.GetAbsoluteMinutes();
+            slot = $"{st.GetExpectedDeliverytime} → {now}";
+            st.SetExpectedDeliveryTime(now);
+        }
+        catch (Exception e) { Plugin.L.LogWarning("Teslim saati ayarlanamadı: " + e.Message); }
+        // Oyunun teslim coroutine'ini Unity'ye bırakmak yerine kendimiz yürütürüz (StepDelivery): içindeki beklemeler atlanır,
+        // "müşteri geldi, aracı aldı" adımları hemen çalışır.
+        deliverStack.Clear(); deliverSteps = 0; deliverLabel = CarLabel(car);
+        deliverStack.Add(csm.DeliverCarCoroutine(car, area));
+        Plugin.L.LogInfo($"Teslim: {deliverLabel} → {area.name} (randevu dk: {slot}, para: {Inv?.GetMoney})");
+    }
+
+    static readonly List<Il2CppSystem.Collections.IEnumerator> deliverStack = new();
+    static string deliverLabel;
+    static int deliverSteps;
+
+    static void StepDelivery()   // karede bir adım
+    {
+        var it = deliverStack[^1];
+        bool more;
+        try { more = it.MoveNext(); }
+        catch (Exception e) { Plugin.L.LogWarning($"Teslim adımı hata ({deliverLabel}, adım {deliverSteps}): {e.Message}"); deliverStack.Clear(); return; }
+        deliverSteps++;
+        if (!more)
+        {
+            deliverStack.RemoveAt(deliverStack.Count - 1);
+            if (deliverStack.Count == 0) { Plugin.L.LogInfo($"Teslim bitti: {deliverLabel} ({deliverSteps} adım, para: {Inv?.GetMoney})"); Toast($"{deliverLabel}: teslim edildi"); }
+            return;
+        }
+        var cur = it.Current;
+        string tn = cur == null ? "null" : cur.GetIl2CppType().Name;
+        Plugin.L.LogInfo($"Teslim adım {deliverSteps}: {tn}");
+        // iç içe coroutine yürütülür; Wait* (randevu saati, süre) beklenmeden geçilir
+        if (cur != null && !tn.StartsWith("Wait")) { var inner = cur.TryCast<Il2CppSystem.Collections.IEnumerator>(); if (inner != null) deliverStack.Add(inner); }
+        if (deliverSteps > 500) { Plugin.L.LogWarning($"Teslim: {deliverLabel} 500 adımda bitmedi, bırakıldı"); deliverStack.Clear(); }
     }
 
     static void PumpDeliveries()
     {
-        for (int i = pendingDeliver.Count - 1; i >= 0; i--)
+        var (car, t, tries, until) = pendingDeliver[0];
+        float now = Time.unscaledTime;   // zaman ölçeği 0 iken de ilerlesin
+        if (now < t) return;
+        if (car == null) { pendingDeliver.RemoveAt(0); return; }
+        if (until == 0f) until = now + 60f;   // sırası yeni geldi: alanın boşalması için en çok 60 sn bekle
+        CustomerCarDeliveryArea area = null; bool more = false;
+        bool inArea = false;
+        try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
+        var csm = UnityEngine.Object.FindObjectOfType<CarServiceManager>();
+        if (inArea && !Spawned(area)) inArea = false;
+        if (csm != null && inArea && area != null && !more)
         {
-            var (car, t, tries) = pendingDeliver[i];
-            if (Time.time < t) continue;
-            pendingDeliver.RemoveAt(i);
-            if (car == null) continue;
-            CustomerCarDeliveryArea area = null; bool more = false;
-            bool inArea = false;
-            try { inArea = car.GetIsInDeliveryArea(out area, out more); } catch { }
-            var csm = UnityEngine.Object.FindObjectOfType<CarServiceManager>();
-            if (inArea && !Spawned(area)) inArea = false;
-            if ((!inArea || area == null) && csm != null && tries < 3)
-            {
-                // fizik bazen ilk taşımayı geri alıyor / alan bir önceki teslimden hâlâ dolu: yeniden dene
-                var a2 = FreeArea(csm);
-                if (a2 != null) { var (pos, rot) = AreaPose(a2); MoveCar(car, pos, rot); try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { } }
-                pendingDeliver.Add((car, Time.time + 1.5f, tries + 1));
-                continue;
-            }
-            if (!inArea || area == null || csm == null) { Toast($"{CarLabel(car)}: teslim alanına girmedi, teslim edilmedi"); Plugin.L.LogWarning($"Teslim: {CarLabel(car)} alana girmedi"); continue; }
-            if (more) { Toast("teslim alanında birden fazla araç var"); continue; }
+            pendingDeliver.RemoveAt(0);
             StartDeliver(csm, car, area);
             Toast($"{CarLabel(car)}: teslim başlatıldı");
+            return;
         }
+        if (csm == null || now > until || tries >= 5)
+        {
+            pendingDeliver.RemoveAt(0);
+            Toast($"{CarLabel(car)}: teslim alanına girmedi, teslim edilmedi");
+            Plugin.L.LogWarning($"Teslim: {CarLabel(car)} alana girmedi (taşıma={tries}, alanda={inArea}, başka araç={more})");
+            return;
+        }
+        if (!inArea || area == null)
+        {
+            // alan bir önceki teslimden hâlâ doluysa boşalana kadar bekle; fizik taşımayı geri aldıysa yeniden taşı
+            var a2 = FreeArea(csm);
+            if (a2 != null)
+            {
+                Vector3 was = car.transform.position;
+                var (pos, rot) = AreaPose(a2); MoveCar(car, pos, rot); try { car.SnapCarPhysicToDeliveryAreaClientRpc(pos, rot); } catch { }
+                tries++;
+                Plugin.L.LogInfo($"Teslim: {CarLabel(car)} taşındı ({tries}) {V(was)} → {V(pos)} alan=#{a2.NetworkObjectId}");
+            }
+            else if (tries == 0 && t == 0f) Plugin.L.LogInfo($"Teslim: {CarLabel(car)} boş alan bekliyor");
+        }
+        pendingDeliver[0] = (car, now + 1.5f, tries, until);
     }
 
     // Teslim akışı takılırsa aracı ödeme almadan sahneden kaldırır.
@@ -1918,18 +2048,22 @@ static class Core
     }
 
     // Değişim izini (son sökülen = asıl eski parça) bir kez kur; denemeler yalnızca takılı eşyayı değiştirir.
-    static void EnsureTrace(CarPartNodeController ctrl, InventoryItem orig)
+    // true = iz bu çağrıda kuruldu → kazanan aday bulunursa eski parça envantere eklenmeli (KeepOld).
+    static bool EnsureTrace(CarPartNodeController ctrl, InventoryItem orig)
     {
         try
         {
             var last = ctrl.GetPrimaryCarPart().lastRemovedCarPartItem.Value;
-            if (!ValidItem(last) || last.sessionBasedIndex == orig.sessionBasedIndex)
-            {
-                ctrl.InitializeWithData(orig, true);
-                try { Inv?.AddCarPartItemWithCarPartName(orig.ItemType, orig, OwnerName()); } catch { }
-            }
+            if (!ValidItem(last) || last.sessionBasedIndex == orig.sessionBasedIndex) { ctrl.InitializeWithData(orig, true); return true; }
         }
         catch { }
+        return false;
+    }
+
+    // Yalnızca parça gerçekten değiştiyse çağrılır; aday bulunamayıp eski parça geri takılınca kopya oluşmasın.
+    static void KeepOld(InventoryItem orig)
+    {
+        try { Inv?.AddCarPartItemWithCarPartName(orig.ItemType, orig, OwnerName()); } catch { }
     }
 
     static void PutHashes(CarPartNodeController ctrl, CarPartNames pn, IList<int> hashes)
@@ -1952,7 +2086,7 @@ static class Core
             .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).Take(60).ToList();
         if (pool.Count == 0) return false;
         ScriptableCarPartItemBase win = null;
-        EnsureTrace(ctrl, orig);
+        bool traced = EnsureTrace(ctrl, orig);
         foreach (var c in pool)
         {
             PutHashes(ctrl, pn, Enumerable.Repeat(itemHash[c.Pointer], count).ToList());
@@ -1960,6 +2094,7 @@ static class Core
             if (v > best + 0.001f) { best = v; win = c; if (best >= 0.999f) break; }
         }
         if (win == null) { ctrl.InitializeWithData(orig, false); return false; }
+        if (traced) KeepOld(orig);
         PutHashes(ctrl, pn, Enumerable.Repeat(itemHash[win.Pointer], count).ToList());
         Plugin.L.LogInfo($"Doğrulama: {pn} ← {win.GetName} ({win.rarity}) [{r.name}: %{start * 100:0} → %{best * 100:0}]");
         return true;
@@ -1977,16 +2112,15 @@ static class Core
             hashes.Add(h);
         }
         if (hashes.Count == 0) return false;
-        ScriptableCarPartItemBase Def(int h) => Items().FirstOrDefault(i => itemHash.TryGetValue(i.Pointer, out var x) && x == h);
-        int ri = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartRim");
-        int ti = hashes.FindIndex(h => Def(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
+        int ri = hashes.FindIndex(h => DefOf(h)?.GetIl2CppType().Name == "ScriptableCarPartRim");
+        int ti = hashes.FindIndex(h => DefOf(h)?.GetIl2CppType().Name == "ScriptableCarPartTire");
         List<ScriptableCarPartItemBase> Pool(string cls) => Items().Where(i => i.GetIl2CppType().Name == cls && itemHash.ContainsKey(i.Pointer))
             .OrderByDescending(i => (int)i.rarity).ThenByDescending(i => i.GetBuyPrice).ToList();
         var rims = ri >= 0 ? Pool("ScriptableCarPartRim") : new List<ScriptableCarPartItemBase>();
         var tires = ti >= 0 ? Pool("ScriptableCarPartTire") : new List<ScriptableCarPartItemBase>();
         float best = ReqScore(car, r) ?? 0f, start = best;
         List<int> win = null;
-        EnsureTrace(ctrl, orig);
+        bool traced = EnsureTrace(ctrl, orig);
         bool Try(List<int> hs)
         {
             PutHashes(ctrl, CarPartNames.Wheel, hs);
@@ -2006,8 +2140,9 @@ static class Core
                 if (Try(hs)) break;
             }
         if (win == null) { ctrl.InitializeWithData(orig, false); return false; }
+        if (traced) KeepOld(orig);
         PutHashes(ctrl, CarPartNames.Wheel, win);
-        Plugin.L.LogInfo($"Doğrulama: Wheel ← {string.Join(" + ", win.Select(h => Def(h)?.GetName ?? "#" + h))} [{r.name}: %{start * 100:0} → %{best * 100:0}]");
+        Plugin.L.LogInfo($"Doğrulama: Wheel ← {string.Join(" + ", win.Select(h => DefOf(h)?.GetName ?? "#" + h))} [{r.name}: %{start * 100:0} → %{best * 100:0}]");
         return true;
     }
 
@@ -2040,8 +2175,8 @@ static class Core
         return plate.Length > 0 ? $"{left} · {plate}".Trim(' ', '·') : left;
     }
 
-    // Tamir edildi = bütün müşteri istekleri oyuna göre %100 (ya da Teslim'e basıldı). 0.5 sn'de bir RefreshWorld'de hesaplanır.
-    // Aşama: 0 görüşme (müşteri henüz aranmadı), 1 tamir (istekler eksik), 2 bekliyor (hepsi %100 / teslim edildi)
+    // Aşama oyunun kendi bayraklarından; 0.5 sn'de bir RefreshWorld'de hesaplanır.
+    // 0 ön görüşme (araç henüz kabul edilmedi), 1 tamirde (kabul edildi), 2 teslime hazır (müşteri arandı / Teslim'e basıldı)
     static readonly Dictionary<ulong, int> carStage = new();
     static int carView;
     static readonly Dictionary<ulong, (int Done, int Total)> carReq = new();
@@ -2055,16 +2190,11 @@ static class Core
     static int StageOf(Car c)
     {
         bool called = false; try { called = c.GetIsCustomerCalled; } catch { }
-        if (!called && !delivered.Contains(c.NetworkObjectId)) return 0;
-        return IsCarDone(c) ? 2 : 1;
-    }
-    static bool IsCarDone(Car car)
-    {
-        if (delivered.Contains(car.NetworkObjectId)) return true;
-        var reqs = car.CarServiceScenario?.serviceRequests;
-        if (reqs == null || reqs.Count == 0) return false;
-        foreach (var r in reqs) if (r != null && (ReqScore(car, r) ?? 0f) < 0.999f) return false;
-        return true;
+        if (called || delivered.Contains(c.NetworkObjectId)) return 2;
+        // Oyunda canlı "kabul edildi" bayrağı yok; kabul anında "parçalara dokunulabilir" açılıyor (oto log ile doğrulandı).
+        // "Kabul alanında" kullanılmaz: kabul edilen araç taşınana kadar alanda kalıyor.
+        bool accepted = true; try { accepted = c.GetCanInteractWithParts; } catch { }   // okunamazsa Tamirde say
+        return accepted ? 1 : 0;
     }
 
     static void DrawCars()
@@ -2076,7 +2206,7 @@ static class Core
         if (Pill(Next(120, LineH), $"Tamirde ({Cnt(1)})", carView == 1)) carView = 1;
         if (Pill(Next(160, LineH), $"Teslime hazır ({Cnt(2)})", carView == 2)) carView = 2;
         EH();
-        Lbl("<color=#9aa0a6>" + (carView == 0 ? "Müşteriyle ön görüşme yapılmadı (aranmadı). Kabul edilince Tamirde'ye geçer." : carView == 1 ? "Kabul edildi, istekler tamamlanmadı." : "Bütün istekler tamam — müşteriye teslim edilebilir.")
+        Lbl("<color=#9aa0a6>" + (carView == 0 ? "Yeni gelen, henüz kabul edilmemiş araçlar. Kabul edilince Tamirde'ye geçer." : carView == 1 ? "Kabul edilen araçlar. Müşteri aranınca Teslime hazır'a geçer." : "Müşterisi aranmış araçlar — teslim edilebilir.")
             + "  Ayrıntı ve parça seçimi için + ya bas.</color>");
         if (cars.Count == 0) { Lbl("<color=#9aa0a6>Sahnede müşteri aracı yok.</color>"); return; }
         var me = LocalPlayer();
@@ -2110,16 +2240,15 @@ static class Core
             if (rl.Count > 0) Lbl($"   <color=#ff8c1f>Müşteri kuralı:</color> {string.Join(", ", rl)}");
             try { if (sc.rustyParts != BodyPartTypes.None) Lbl($"   <color=#ff8c1f>Pas:</color> {sc.rustyParts}"); } catch { }
             var targets = IssueTargets(car, sc);
-            if (!repairSel.TryGetValue(id, out var sel))   // varsayılan: hepsi seçili
-                repairSel[id] = sel = Enumerable.Range(0, targets.Count).Append(BodyIdx).ToHashSet();
+            if (!repairOff.TryGetValue(id, out var off)) repairOff[id] = off = new();   // varsayılan: hepsi seçili
             if (targets.Count == 0) Lbl("   <color=#9aa0a6>Parça değişimi gerektiren arıza yok</color>");
             for (int i = 0; i < targets.Count; i++)
             {
                 var (ctrl, pn, issue, change, _, _) = targets[i];
                 H();
                 cx += 14;
-                bool on = sel.Contains(i);
-                if (Tgl(on, $"{pn}") != on) { if (on) sel.Remove(i); else sel.Add(i); }
+                bool on = !off.Contains(ctrl.Pointer);
+                if (Tgl(on, $"{pn}") != on) { if (on) off.Add(ctrl.Pointer); else off.Remove(ctrl.Pointer); }
                 cx = lx + 200;
                 Lbl($"<color=#9aa0a6>{issue}</color> {(change ? "[değiştir]" : "[doldur/şarj]")}", 260);
                 Lbl(ItemLabel(ctrl), 220);
@@ -2129,11 +2258,13 @@ static class Core
             try { hasBody = sc.rustyParts != BodyPartTypes.None || (sc.serviceRequests != null && sc.serviceRequests.ToArray().Any(r => r?.TryCast<ScriptablePaintBodyPartServiceRequest>() != null)); } catch { }
             H();
             cx += 14;
-            if (hasBody) { bool b = sel.Contains(BodyIdx); if (Tgl(b, "Kaporta (pas/boya/yıkama)") != b) { if (b) sel.Remove(BodyIdx); else sel.Add(BodyIdx); } }
-            if (Btn("Tümünü seç", 90)) { sel.UnionWith(Enumerable.Range(0, targets.Count)); sel.Add(BodyIdx); }
-            if (Btn("Hiçbiri", 70)) sel.Clear();
-            if (Btn($"Seçilenleri onar ({sel.Count(x => x != BodyIdx) + (hasBody && sel.Contains(BodyIdx) ? 1 : 0)})", 170))
-                Game("repair", $"{id};{string.Join(",", sel)}");
+            if (hasBody) { bool b = !off.Contains(IntPtr.Zero); if (Tgl(b, "Kaporta (pas/boya/yıkama)") != b) { if (b) off.Add(IntPtr.Zero); else off.Remove(IntPtr.Zero); } }
+            if (Btn("Tümünü seç", 90)) off.Clear();
+            if (Btn("Hiçbiri", 70)) { off.UnionWith(targets.Select(t => t.Ctrl.Pointer)); off.Add(IntPtr.Zero); }
+            var sel = Enumerable.Range(0, targets.Count).Where(i => !off.Contains(targets[i].Ctrl.Pointer)).ToList();
+            bool body = !off.Contains(IntPtr.Zero);
+            if (Btn($"Seçilenleri onar ({sel.Count + (hasBody && body ? 1 : 0)})", 170))
+                Game("repair", $"{id};{string.Join(",", body ? sel.Append(BodyIdx) : sel)}");
             EH();
             H();
             cx += 14;
@@ -2328,6 +2459,9 @@ static class Core
         bool h = Tgl(hud, "HUD göster (FPS, ms, grafik API, rol, ping, konum, hata sayısı)");
         if (h != hud) { hud = h; if (hudCfg != null) hudCfg.Value = h; }
         Lbl("<color=#9aa0a6>Menü açıkken oyunun bütün tuş/fare girdileri kapalıdır; kapatınca geri gelir.</color>");
+        Sec("Oyun");
+        bool nh = Tgl(noHoldCfg.Value, "Basılı tutma yok: parça sökme, satın alma vb. tek tıkla (duraklatma menüsü hariç)");
+        if (nh != noHoldCfg.Value) { noHoldCfg.Value = nh; ApplyNoHold(); }
         Sec("Grafik");
         Lbl($"API: <b>{SystemInfo.graphicsDeviceType}</b>   GPU: {SystemInfo.graphicsDeviceName}   VRAM: {SystemInfo.graphicsMemorySize} MB");
         Lbl($"Çözünürlük: {Screen.width}x{Screen.height}   Sahne: {SceneManager.GetActiveScene().name}");

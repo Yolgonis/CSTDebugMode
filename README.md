@@ -20,7 +20,7 @@ DX11/DX12/Vulkan farketmez, Present/DXGI hook'u yok → **DX12'de çalışır**.
 | F10 | Uçma/noclip (WASD, Space yukarı, Ctrl aşağı, Shift hızlı) |
 
 ## Sekmeler
-- **Araçlar**: müşteri araçları üç grupta — *Görüşme* (müşteri aranmadı), *Tamir* (istekler eksik), *Bekliyor* (hepsi %100).
+- **Araçlar**: müşteri araçları üç grupta — *Ön görüşme* (henüz kabul edilmedi), *Tamirde* (kabul edildi), *Teslime hazır* (müşteri arandı).
   Satırda plaka, tamamlanan istek sayısı, Git ve aşamaya göre Onar / Teslim et. `+` ile ayrıntı: istekler, müşteri kuralı,
   tek tek seçerek onarım, Döküm (log'a teşhis), Kaldır (ödemesiz sil — takılan araç için).
 - **Ekonomi**: para, itibar, yeni müşteri aracı, anında kargo, gün/saat.
